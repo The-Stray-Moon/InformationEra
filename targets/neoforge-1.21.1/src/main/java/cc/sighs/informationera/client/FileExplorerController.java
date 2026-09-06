@@ -7,6 +7,7 @@ import com.sighs.apricityui.init.Document;
 import com.sighs.apricityui.init.Element;
 import com.sighs.apricityui.layout.Position;
 import com.sighs.apricityui.layout.Size;
+import net.minecraft.client.Minecraft;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -62,6 +63,7 @@ public final class FileExplorerController {
     private Element capture;
     private Element selectionRect;
     private Element tooltip;
+    private Element dragGhost;
 
     private final List<Tab> tabs = new ArrayList<>();
     private int activeTab = 0;
@@ -96,12 +98,15 @@ public final class FileExplorerController {
     private boolean previewOpen = false;
     private boolean compact = false;
     private boolean detailsPaneOpen = false;
+    private String groupBy = null;
+    private boolean showExtensions = true;
     private String searchQuery = "";
     private int lastClickedIndex = -1;
 
     private final List<ClipItem> clipboard = new ArrayList<>();
     private boolean clipboardCut = false;
     private final Deque<Runnable> undoStack = new ArrayDeque<>();
+    private final Deque<Runnable> redoStack = new ArrayDeque<>();
 
     private String interaction = "none";
     private String resizeHandle = "";
@@ -128,6 +133,20 @@ public final class FileExplorerController {
     private double dragStartY;
     private VirtualFileSystem.Entry dragEntry;
     private String dragSourceKey;
+
+    private boolean pendingRightDrag = false;
+    private boolean rightDragActive = false;
+    private double rightDragStartX;
+    private double rightDragStartY;
+    private VirtualFileSystem.Entry rightDragEntry;
+    private String rightDragSourceKey;
+    private String rightDropTargetKey;
+
+    private int tabDragIndex = -1;
+    private boolean tabDragActive = false;
+    private boolean tabDragMoved = false;
+    private double tabDragStartX;
+    private double tabDragStartY;
 
     private VirtualFileSystem.Entry renamingEntry;
 
@@ -161,6 +180,7 @@ public final class FileExplorerController {
         this.capture = document.getElementById("fe-capture");
         this.selectionRect = document.getElementById("fe-selection-rect");
         this.tooltip = document.getElementById("fe-tooltip");
+        this.dragGhost = document.getElementById("fe-drag-ghost");
 
         tabs.clear();
         tabs.add(new Tab());
@@ -182,6 +202,7 @@ public final class FileExplorerController {
         updateDetailsPane();
         updateCommandButtons();
         updateNavButtons();
+        updateSearchPlaceholder();
         setStatus("");
 
         ACTIVE = this;
@@ -215,7 +236,11 @@ public final class FileExplorerController {
         if (titlebar != null) {
             titlebar.addEventListener("mousedown", e -> {
                 if (e instanceof MouseEvent me && me.button == 0) {
-                    beginDrag(me.clientX, me.clientY);
+                    if (me.clickCount >= 2) {
+                        toggleMaximize();
+                    } else {
+                        beginDrag(me.clientX, me.clientY);
+                    }
                 }
             });
             titlebar.addEventListener("contextmenu", e -> {
@@ -256,6 +281,8 @@ public final class FileExplorerController {
         bindToolButton("fe-cmd-rename", this::renamePrimary);
         bindToolButton("fe-cmd-delete", this::delete);
         bindToolButton("fe-preview", this::togglePreview);
+        bindToolButton("fe-view-details", () -> setViewMode("details"));
+        bindToolButton("fe-view-thumb", () -> setViewMode("large"));
 
         bindMenuButton("fe-new", this::showNewMenu);
         bindMenuButton("fe-sort", this::showSortMenu);
@@ -276,6 +303,8 @@ public final class FileExplorerController {
         bindButtonHint("fe-sort", "排序");
         bindButtonHint("fe-layout", "查看");
         bindButtonHint("fe-preview", "预览窗格");
+        bindButtonHint("fe-view-details", "详细信息");
+        bindButtonHint("fe-view-thumb", "大缩略图");
 
         Element search = document.getElementById("fe-search");
         if (search != null) {
@@ -322,6 +351,11 @@ public final class FileExplorerController {
                 Element target = e.target instanceof Element ? (Element) e.target : null;
                 if (target == null || target.closest(".fe-item") == null) {
                     showContentContextMenu(me.clientX, me.clientY);
+                }
+            });
+            content.addEventListener("wheel", e -> {
+                if (e instanceof MouseEvent me) {
+                    handleContentWheel(me);
                 }
             });
         }
@@ -381,7 +415,35 @@ public final class FileExplorerController {
                 double dy = me.clientY - dragStartY;
                 if (dx * dx + dy * dy > 25) {
                     dragActive = true;
+                    showDragGhost(dragEntry, me.clientX, me.clientY);
                 }
+            }
+            if (dragActive) {
+                moveDragGhost(me.clientX, me.clientY);
+            }
+            if (pendingRightDrag && !rightDragActive) {
+                double dx = me.clientX - rightDragStartX;
+                double dy = me.clientY - rightDragStartY;
+                if (dx * dx + dy * dy > 25) {
+                    rightDragActive = true;
+                    closeContextMenu();
+                    showDragGhost(rightDragEntry, me.clientX, me.clientY);
+                }
+            }
+            if (rightDragActive) {
+                moveDragGhost(me.clientX, me.clientY);
+            }
+            if (tabDragIndex >= 0 && !tabDragActive) {
+                double dx = me.clientX - tabDragStartX;
+                double dy = me.clientY - tabDragStartY;
+                if (dx * dx + dy * dy > 25) {
+                    tabDragActive = true;
+                    tabDragMoved = true;
+                    showTabGhost(tabs.get(tabDragIndex).title, me.clientX, me.clientY);
+                }
+            }
+            if (tabDragActive && tabDragIndex >= 0) {
+                moveDragGhost(me.clientX, me.clientY);
             }
         });
         document.addEventListener("mouseup", e -> {
@@ -391,10 +453,28 @@ public final class FileExplorerController {
             if (dragActive) {
                 dropAt(me.clientX, me.clientY, me.controlKey);
             }
+            if (rightDragActive) {
+                resolveRightDropTarget(me.clientX, me.clientY);
+                showDropMenu(me.clientX, me.clientY);
+            }
             pendingDrag = false;
             dragActive = false;
             dragEntry = null;
             dragSourceKey = null;
+            pendingRightDrag = false;
+            rightDragActive = false;
+            rightDragEntry = null;
+            rightDragSourceKey = null;
+            rightDropTargetKey = null;
+            if (tabDragActive && tabDragIndex >= 0) {
+                int target = tabIndexAt(me.clientX);
+                if (target >= 0 && target != tabDragIndex) {
+                    moveTab(tabDragIndex, target);
+                }
+            }
+            tabDragIndex = -1;
+            tabDragActive = false;
+            hideDragGhost();
         });
     }
 
@@ -453,7 +533,17 @@ public final class FileExplorerController {
             }
             String key = ke.key;
             boolean ctrl = ke.controlKey;
-            if (ctrl && "a".equalsIgnoreCase(key)) {
+            boolean alt = ke.altKey;
+            boolean shift = ke.shiftKey;
+            if (ctrl && shift && "n".equalsIgnoreCase(key)) {
+                createFolder();
+            } else if (ctrl && "t".equalsIgnoreCase(key)) {
+                newTab();
+            } else if (ctrl && "w".equalsIgnoreCase(key)) {
+                closeTab(activeTab);
+            } else if (ctrl && "n".equalsIgnoreCase(key)) {
+                newTab();
+            } else if (ctrl && "a".equalsIgnoreCase(key)) {
                 selectAll();
             } else if (ctrl && "c".equalsIgnoreCase(key)) {
                 copy();
@@ -463,6 +553,18 @@ public final class FileExplorerController {
                 paste();
             } else if (ctrl && "z".equalsIgnoreCase(key)) {
                 undo();
+            } else if (ctrl && "y".equalsIgnoreCase(key)) {
+                redo();
+            } else if (ctrl && ("f".equalsIgnoreCase(key) || "e".equalsIgnoreCase(key))) {
+                focusSearch();
+            } else if ("F5".equalsIgnoreCase(key) || (ctrl && "r".equalsIgnoreCase(key))) {
+                renderContent();
+            } else if (alt && ("ArrowLeft".equalsIgnoreCase(key) || "Left".equalsIgnoreCase(key))) {
+                navigateBack();
+            } else if (alt && ("ArrowRight".equalsIgnoreCase(key) || "Right".equalsIgnoreCase(key))) {
+                navigateForward();
+            } else if (alt && ("ArrowUp".equalsIgnoreCase(key) || "Up".equalsIgnoreCase(key))) {
+                navigateUp();
             } else if ("Delete".equals(key)) {
                 delete();
             } else if ("Enter".equals(key)) {
@@ -473,6 +575,13 @@ public final class FileExplorerController {
                 renamePrimary();
             }
         });
+    }
+
+    private void focusSearch() {
+        Element search = document.getElementById("fe-search");
+        if (search != null) {
+            search.focus();
+        }
     }
 
     // ---------- 多标签页 ----------
@@ -495,8 +604,24 @@ public final class FileExplorerController {
         strip.setInnerHTML(sb.toString());
 
         for (Element tabEl : strip.querySelectorAll(".fe-tab[data-tab]")) {
-            tabEl.addEventListener("mousedown", e -> e.stopPropagation());
+            tabEl.addEventListener("mousedown", e -> {
+                e.stopPropagation();
+                if (e instanceof MouseEvent me && me.button == 0) {
+                    String idx = tabEl.getAttribute("data-tab");
+                    if (idx != null) {
+                        tabDragIndex = Integer.parseInt(idx);
+                        tabDragActive = false;
+                        tabDragMoved = false;
+                        tabDragStartX = me.clientX;
+                        tabDragStartY = me.clientY;
+                    }
+                }
+            });
             tabEl.addEventListener("click", e -> {
+                if (tabDragMoved) {
+                    tabDragMoved = false;
+                    return;
+                }
                 String idx = tabEl.getAttribute("data-tab");
                 if (idx != null) {
                     switchToTab(Integer.parseInt(idx));
@@ -569,11 +694,52 @@ public final class FileExplorerController {
         renderAllAfterTabChange();
     }
 
+    private int tabIndexAt(double mouseX) {
+        for (Element tabEl : document.querySelectorAll(".fe-tab[data-tab]")) {
+            String idx = tabEl.getAttribute("data-tab");
+            if (idx == null) {
+                continue;
+            }
+            Element.DOMRect rect = tabEl.getBoundingClientRect();
+            if (rect == null) {
+                continue;
+            }
+            if (mouseX < rect.left + rect.width / 2) {
+                try {
+                    return Integer.parseInt(idx);
+                } catch (NumberFormatException ignored) {
+                }
+            }
+        }
+        return tabs.isEmpty() ? -1 : tabs.size() - 1;
+    }
+
+    private void moveTab(int from, int to) {
+        if (from == to || from < 0 || from >= tabs.size() || to < 0 || to >= tabs.size()) {
+            return;
+        }
+        Tab tab = tabs.remove(from);
+        tabs.add(to, tab);
+        if (activeTab == from) {
+            activeTab = to;
+        } else if (from < activeTab && to >= activeTab) {
+            activeTab--;
+        } else if (from > activeTab && to <= activeTab) {
+            activeTab++;
+        }
+        tabDragIndex = to;
+        renderTabs();
+    }
+
     private void newTab() {
         saveActiveTab();
-        tabs.add(new Tab());
+        Tab tab = new Tab();
+        tab.currentKey = currentKey;
+        VirtualFileSystem.Folder folder = fs.folder(currentKey);
+        tab.title = folder != null ? folder.name : "文件资源管理器";
+        tabs.add(tab);
         activeTab = tabs.size() - 1;
-        loadTab(tabs.get(activeTab));
+        loadTab(tab);
         renderAllAfterTabChange();
     }
 
@@ -606,6 +772,7 @@ public final class FileExplorerController {
         if (search != null) {
             search.setValue(searchQuery);
         }
+        updateSearchPlaceholder();
         setStatus("");
     }
 
@@ -881,27 +1048,76 @@ public final class FileExplorerController {
         afterMutation();
     }
 
+    private void resolveRightDropTarget(double x, double y) {
+        rightDropTargetKey = null;
+        Element target = document.hitTest(new Position(x, y));
+        if (target == null) {
+            return;
+        }
+        Element folderEl = target.closest("[data-path]");
+        if (folderEl != null) {
+            rightDropTargetKey = folderEl.getAttribute("data-path");
+        }
+    }
+
+    private void showDropMenu(double x, double y) {
+        if (rightDragEntry == null || rightDragSourceKey == null) {
+            return;
+        }
+        List<CtxEntry> entries = new ArrayList<>();
+        entries.add(CtxEntry.header(rightDragEntry.name));
+        entries.add(CtxEntry.action("移动到此处", () -> performRightDrop(false)));
+        entries.add(CtxEntry.action("复制到此处", () -> performRightDrop(true)));
+        entries.add(CtxEntry.separator());
+        entries.add(CtxEntry.action("取消", () -> {
+        }));
+        openContextMenu(x, y, entries);
+    }
+
+    private void performRightDrop(boolean copy) {
+        if (rightDragEntry == null || rightDragSourceKey == null || rightDropTargetKey == null) {
+            setStatus("无法放置到此位置");
+            return;
+        }
+        if (rightDragEntry.folder && rightDragEntry.childKey != null && rightDropTargetKey.startsWith(rightDragEntry.childKey)) {
+            setStatus("不能移动到自身内部");
+            return;
+        }
+        if (copy) {
+            pushUndo(fs.duplicateInto(rightDropTargetKey, rightDragEntry));
+            setStatus("已复制到目标文件夹");
+        } else {
+            pushUndo(fs.move(rightDragSourceKey, rightDropTargetKey, rightDragEntry));
+            setStatus("已移动到目标文件夹");
+        }
+        afterMutation();
+    }
+
     // ---------- 右键菜单（自绘，Ore 主题） ----------
 
-    private record CtxEntry(int kind, String label, boolean danger, boolean checked, Runnable action) {
+    private record CtxEntry(int kind, String label, boolean danger, boolean checked, Runnable action, List<CtxEntry> children) {
         static CtxEntry header(String label) {
-            return new CtxEntry(0, label, false, false, null);
+            return new CtxEntry(0, label, false, false, null, null);
         }
 
         static CtxEntry separator() {
-            return new CtxEntry(1, "", false, false, null);
+            return new CtxEntry(1, "", false, false, null, null);
         }
 
         static CtxEntry action(String label, Runnable action) {
-            return new CtxEntry(2, label, false, false, action);
+            return new CtxEntry(2, label, false, false, action, null);
         }
 
         static CtxEntry actionChecked(String label, boolean checked, Runnable action) {
-            return new CtxEntry(2, label, false, checked, action);
+            return new CtxEntry(2, label, false, checked, action, null);
         }
 
         static CtxEntry actionDanger(String label, Runnable action) {
-            return new CtxEntry(2, label, true, false, action);
+            return new CtxEntry(2, label, true, false, action, null);
+        }
+
+        static CtxEntry submenu(String label, List<CtxEntry> children) {
+            return new CtxEntry(3, label, false, false, null, children);
         }
     }
 
@@ -924,6 +1140,7 @@ public final class FileExplorerController {
         entries.add(CtxEntry.separator());
         entries.add(CtxEntry.action("粘贴", this::paste));
         entries.add(CtxEntry.action("撤销", this::undo));
+        entries.add(CtxEntry.action("重做", this::redo));
         entries.add(CtxEntry.separator());
         entries.add(CtxEntry.action("全选", this::selectAll));
         entries.add(CtxEntry.action("反向选择", this::invertSelection));
@@ -945,14 +1162,22 @@ public final class FileExplorerController {
         List<CtxEntry> entries = new ArrayList<>();
         entries.add(CtxEntry.header(entry.name));
         entries.add(CtxEntry.action("打开", () -> openEntry(entry)));
+        entries.add(CtxEntry.submenu("打开方式", List.of(
+                CtxEntry.action("记事本", () -> setStatus("已用记事本打开：" + entry.name)),
+                CtxEntry.action("默认应用", () -> openEntry(entry)))));
         entries.add(CtxEntry.action("重命名", () -> beginRename(item, entry)));
         entries.add(CtxEntry.separator());
         entries.add(CtxEntry.action("剪切", this::cut));
         entries.add(CtxEntry.action("复制", this::copy));
+        entries.add(CtxEntry.action("复制路径", () -> copyPath(entry)));
         if (entry.folder && entry.childKey != null) {
             String key = entry.childKey;
             entries.add(CtxEntry.action(pinned.contains(key) ? "从快速访问取消固定" : "固定到快速访问", () -> togglePin(key)));
         }
+        entries.add(CtxEntry.submenu("发送到", List.of(
+                CtxEntry.action("桌面", () -> sendTo("desktop", entry)),
+                CtxEntry.action("文档", () -> sendTo("documents", entry)),
+                CtxEntry.action("下载", () -> sendTo("downloads", entry)))));
         entries.add(CtxEntry.actionDanger("删除", this::delete));
         entries.add(CtxEntry.separator());
         entries.add(CtxEntry.action("属性", () -> setStatus(entry.name + " —— " + entry.type + "，" + (entry.folder ? "文件夹" : formatSize(entry.size)))));
@@ -975,6 +1200,13 @@ public final class FileExplorerController {
         entries.add(CtxEntry.separator());
         entries.add(CtxEntry.actionChecked("升序", sortAsc, () -> setSortAscending(true)));
         entries.add(CtxEntry.actionChecked("降序", !sortAsc, () -> setSortAscending(false)));
+        entries.add(CtxEntry.separator());
+        entries.add(CtxEntry.submenu("分组依据", List.of(
+                CtxEntry.actionChecked("无", groupBy == null, () -> setGroupBy(null)),
+                CtxEntry.actionChecked("名称", "name".equals(groupBy), () -> setGroupBy("name")),
+                CtxEntry.actionChecked("修改日期", "modified".equals(groupBy), () -> setGroupBy("modified")),
+                CtxEntry.actionChecked("类型", "type".equals(groupBy), () -> setGroupBy("type")),
+                CtxEntry.actionChecked("大小", "size".equals(groupBy), () -> setGroupBy("size")))));
         openContextMenu(x, y, entries);
     }
 
@@ -995,6 +1227,7 @@ public final class FileExplorerController {
         entries.add(CtxEntry.actionChecked("详细信息窗格", detailsPaneOpen, this::toggleDetailsPane));
         entries.add(CtxEntry.separator());
         entries.add(CtxEntry.actionChecked("复选框选择", checkboxes, this::toggleCheckboxes));
+        entries.add(CtxEntry.actionChecked("文件扩展名", showExtensions, this::toggleExtensions));
         openContextMenu(x, y, entries);
     }
 
@@ -1005,35 +1238,11 @@ public final class FileExplorerController {
         }
         List<Runnable> actions = new ArrayList<>();
         StringBuilder sb = new StringBuilder();
-        int estimatedHeight = 0;
-        for (CtxEntry entry : entries) {
-            switch (entry.kind) {
-                case 0 -> {
-                    sb.append("<div class=\"fe-ctx-header\">").append(escape(entry.label)).append("</div>");
-                    estimatedHeight += 30;
-                }
-                case 1 -> {
-                    sb.append("<div class=\"fe-ctx-sep\"></div>");
-                    estimatedHeight += 10;
-                }
-                case 2 -> {
-                    actions.add(entry.action);
-                    int index = actions.size() - 1;
-                    sb.append("<div class=\"fe-ctx-item")
-                      .append(entry.danger ? " danger" : "")
-                      .append("\" data-i=\"").append(index).append("\">");
-                    sb.append("<span class=\"fe-ctx-mark\">").append(entry.checked ? "✓" : "").append("</span>");
-                    sb.append("<span class=\"fe-ctx-label\">").append(escape(entry.label)).append("</span>");
-                    sb.append("</div>");
-                    estimatedHeight += 30;
-                }
-                default -> {
-                }
-            }
-        }
+        appendContextEntries(sb, entries, actions);
         menu.setInnerHTML(sb.toString());
 
         Size viewport = document.getViewportSize();
+        int estimatedHeight = estimateContextHeight(entries);
         double left = Math.max(2, Math.min(x, viewport.width() - MENU_WIDTH - 4));
         double top = Math.max(2, Math.min(y, viewport.height() - estimatedHeight - 4));
         menu.setInlineStyleProperty("left", px(left));
@@ -1043,6 +1252,10 @@ public final class FileExplorerController {
 
         for (Element item : menu.querySelectorAll(".fe-ctx-item")) {
             item.addEventListener("click", e -> {
+                if (item.getClassList().contains("fe-has-sub")) {
+                    e.stopPropagation();
+                    return;
+                }
                 closeContextMenu();
                 String idx = item.getAttribute("data-i");
                 if (idx == null) {
@@ -1057,6 +1270,48 @@ public final class FileExplorerController {
                 }
             });
         }
+    }
+
+    private void appendContextEntries(StringBuilder sb, List<CtxEntry> entries, List<Runnable> actions) {
+        for (CtxEntry entry : entries) {
+            switch (entry.kind) {
+                case 0 -> sb.append("<div class=\"fe-ctx-header\">").append(escape(entry.label)).append("</div>");
+                case 1 -> sb.append("<div class=\"fe-ctx-sep\"></div>");
+                case 2 -> {
+                    actions.add(entry.action);
+                    int index = actions.size() - 1;
+                    sb.append("<div class=\"fe-ctx-item")
+                      .append(entry.danger ? " danger" : "")
+                      .append("\" data-i=\"").append(index).append("\">");
+                    sb.append("<span class=\"fe-ctx-mark\">").append(entry.checked ? "✓" : "").append("</span>");
+                    sb.append("<span class=\"fe-ctx-label\">").append(escape(entry.label)).append("</span>");
+                    sb.append("</div>");
+                }
+                case 3 -> {
+                    sb.append("<div class=\"fe-ctx-item fe-has-sub\">");
+                    sb.append("<span class=\"fe-ctx-mark\"></span>");
+                    sb.append("<span class=\"fe-ctx-label\">").append(escape(entry.label)).append(" ▸</span>");
+                    sb.append("<div class=\"fe-ctx-submenu\">");
+                    appendContextEntries(sb, entry.children, actions);
+                    sb.append("</div>");
+                    sb.append("</div>");
+                }
+                default -> {
+                }
+            }
+        }
+    }
+
+    private int estimateContextHeight(List<CtxEntry> entries) {
+        int h = 0;
+        for (CtxEntry entry : entries) {
+            if (entry.kind == 1) {
+                h += 10;
+            } else {
+                h += 30;
+            }
+        }
+        return h;
     }
 
     private void closeContextMenu() {
@@ -1195,13 +1450,28 @@ public final class FileExplorerController {
             setStatus("没有可撤销的操作");
             return;
         }
-        undoStack.pop().run();
+        Runnable action = undoStack.pop();
+        action.run();
+        redoStack.push(action);
         afterMutation();
         setStatus("已撤销");
     }
 
+    private void redo() {
+        if (redoStack.isEmpty()) {
+            setStatus("没有可重做的操作");
+            return;
+        }
+        Runnable action = redoStack.pop();
+        action.run();
+        undoStack.push(action);
+        afterMutation();
+        setStatus("已重做");
+    }
+
     private void pushUndo(Runnable undo) {
         undoStack.push(undo);
+        redoStack.clear();
     }
 
     private void afterMutation() {
@@ -1293,6 +1563,20 @@ public final class FileExplorerController {
         };
     }
 
+    private void handleContentWheel(MouseEvent me) {
+        if (!me.controlKey) {
+            return;
+        }
+        List<String> modes = List.of("small", "medium", "large", "xlarge");
+        int idx = modes.indexOf(viewMode);
+        if (idx < 0) {
+            setViewMode(me.deltaY < 0 ? "large" : "small");
+            return;
+        }
+        int next = me.deltaY < 0 ? Math.min(idx + 1, modes.size() - 1) : Math.max(idx - 1, 0);
+        setViewMode(modes.get(next));
+    }
+
     private void setSort(String field) {
         sortField = field;
         renderContent();
@@ -1325,6 +1609,16 @@ public final class FileExplorerController {
 
     private void toggleCompact() {
         compact = !compact;
+        renderContent();
+    }
+
+    private void setGroupBy(String value) {
+        groupBy = value;
+        renderContent();
+    }
+
+    private void toggleExtensions() {
+        showExtensions = !showExtensions;
         renderContent();
     }
 
@@ -1469,6 +1763,7 @@ public final class FileExplorerController {
         if (search != null) {
             search.setValue("");
         }
+        updateSearchPlaceholder();
         renderContent();
         renderNavigationState();
         renderBreadcrumb();
@@ -1634,16 +1929,21 @@ public final class FileExplorerController {
         }
         renderedEntryList.clear();
         lastClickedIndex = -1;
-        content.setInnerHTML(switch (viewMode) {
-            case "details" -> buildTable();
-            case "list" -> buildList();
-            default -> buildGrid();
-        });
+        if (topLevelEntries().isEmpty()) {
+            content.setInnerHTML("<div class=\"fe-empty\">此文件夹为空</div>");
+        } else {
+            content.setInnerHTML(switch (viewMode) {
+                case "details" -> buildTable();
+                case "list" -> buildList();
+                default -> buildGrid();
+            });
+        }
         bindItemListeners();
         bindTableHeaders();
         updateSelectionVisuals();
         updateStatusBar();
         applyCompact();
+        updateStatusViewButtons();
     }
 
     private List<VirtualFileSystem.Entry> topLevelEntries() {
@@ -1660,6 +1960,40 @@ public final class FileExplorerController {
         }
         sortEntries(entries);
         return entries;
+    }
+
+    private String displayName(VirtualFileSystem.Entry entry) {
+        if (entry.folder || showExtensions) {
+            return entry.name;
+        }
+        int dot = entry.name.lastIndexOf('.');
+        if (dot > 0) {
+            return entry.name.substring(0, dot);
+        }
+        return entry.name;
+    }
+
+    private String groupLabel(VirtualFileSystem.Entry entry) {
+        return switch (groupBy == null ? "" : groupBy) {
+            case "name" -> entry.name.isEmpty() ? "" : entry.name.substring(0, 1).toUpperCase();
+            case "modified" -> entry.modified;
+            case "type" -> entry.type;
+            case "size" -> entry.folder ? "文件夹" : sizeGroup(entry.size);
+            default -> "";
+        };
+    }
+
+    private static String sizeGroup(long size) {
+        if (size < 1024L) {
+            return "小 (< 1 KB)";
+        }
+        if (size < 1024L * 1024L) {
+            return "中 (1 KB - 1 MB)";
+        }
+        if (size < 1024L * 1024L * 1024L) {
+            return "大 (1 MB - 1 GB)";
+        }
+        return "超大 (> 1 GB)";
     }
 
     private void sortEntries(List<VirtualFileSystem.Entry> entries) {
@@ -1695,8 +2029,26 @@ public final class FileExplorerController {
             }
         }
         sb.append("</tr></thead><tbody>");
-        for (VirtualFileSystem.Entry entry : topLevelEntries()) {
-            renderTableRow(sb, entry);
+        List<VirtualFileSystem.Entry> entries = topLevelEntries();
+        if (groupBy != null && !groupBy.isEmpty()) {
+            entries.sort((a, b) -> {
+                int cmp = groupLabel(a).compareToIgnoreCase(groupLabel(b));
+                return cmp != 0 ? cmp : a.name.compareToIgnoreCase(b.name);
+            });
+            String currentGroup = null;
+            for (VirtualFileSystem.Entry entry : entries) {
+                String label = groupLabel(entry);
+                if (!label.equals(currentGroup)) {
+                    currentGroup = label;
+                    sb.append("<tr class=\"fe-group-row\" style=\"grid-template-columns:1fr;\"><td class=\"fe-group-header\">")
+                      .append(escape(label)).append("</td></tr>");
+                }
+                renderTableRow(sb, entry);
+            }
+        } else {
+            for (VirtualFileSystem.Entry entry : entries) {
+                renderTableRow(sb, entry);
+            }
         }
         sb.append("</tbody></table>");
         return sb.toString();
@@ -1769,7 +2121,7 @@ public final class FileExplorerController {
                     sb.append("<span class=\"fe-check\" data-id=\"e").append(index).append("\"></span>");
                 }
                 sb.append(iconFor(entry, 16))
-                  .append("<span class=\"fe-name-text\">").append(escape(entry.name)).append("</span>")
+                  .append("<span class=\"fe-name-text\">").append(escape(displayName(entry))).append("</span>")
                   .append("</div></td>");
                 return sb.toString();
             }
@@ -1866,7 +2218,7 @@ public final class FileExplorerController {
                 sb.append("<span class=\"fe-check\" data-id=\"e").append(index).append("\"></span>");
             }
             sb.append("<div class=\"fe-icon\">").append(iconFor(entry, iconSize)).append("</div>");
-            sb.append("<div class=\"fe-name\">").append(escape(entry.name)).append("</div>");
+            sb.append("<div class=\"fe-name\">").append(escape(displayName(entry))).append("</div>");
             sb.append("</div>");
         }
         sb.append("</div>");
@@ -1886,7 +2238,7 @@ public final class FileExplorerController {
                 sb.append("<span class=\"fe-check\" data-id=\"e").append(index).append("\"></span>");
             }
             sb.append("<span class=\"fe-icon\">").append(iconFor(entry, 16)).append("</span>");
-            sb.append("<span class=\"fe-name-text\">").append(escape(entry.name)).append("</span>");
+            sb.append("<span class=\"fe-name-text\">").append(escape(displayName(entry))).append("</span>");
             sb.append("</div>");
         }
         sb.append("</div>");
@@ -1901,19 +2253,31 @@ public final class FileExplorerController {
         for (Element item : document.querySelectorAll(".fe-item")) {
             item.addEventListener("click", e -> handleItemClick(item, e));
             item.addEventListener("contextmenu", e -> {
+                if (rightDragActive) {
+                    return;
+                }
                 e.stopPropagation();
                 if (e instanceof MouseEvent me) {
                     showItemContextMenu(item, entryFor(item), me.clientX, me.clientY);
                 }
             });
             item.addEventListener("mousedown", e -> {
-                if (e instanceof MouseEvent me && me.button == 0) {
-                    pendingDrag = true;
-                    dragActive = false;
-                    dragStartX = me.clientX;
-                    dragStartY = me.clientY;
-                    dragEntry = entryFor(item);
-                    dragSourceKey = currentKey;
+                if (e instanceof MouseEvent me) {
+                    if (me.button == 0) {
+                        pendingDrag = true;
+                        dragActive = false;
+                        dragStartX = me.clientX;
+                        dragStartY = me.clientY;
+                        dragEntry = entryFor(item);
+                        dragSourceKey = currentKey;
+                    } else if (me.button == 2) {
+                        pendingRightDrag = true;
+                        rightDragActive = false;
+                        rightDragStartX = me.clientX;
+                        rightDragStartY = me.clientY;
+                        rightDragEntry = entryFor(item);
+                        rightDragSourceKey = currentKey;
+                    }
                 }
             });
             item.addEventListener("mouseover", e -> {
@@ -2054,6 +2418,38 @@ public final class FileExplorerController {
         }
     }
 
+    private void showDragGhost(VirtualFileSystem.Entry entry, double x, double y) {
+        if (dragGhost == null || entry == null) {
+            return;
+        }
+        dragGhost.setInnerHTML("<div class=\"fe-ghost-row\">" + iconFor(entry, 16) + "<span>" + escape(entry.name) + "</span></div>");
+        moveDragGhost(x, y);
+        dragGhost.setInlineStyleProperty("display", "flex");
+    }
+
+    private void showTabGhost(String title, double x, double y) {
+        if (dragGhost == null) {
+            return;
+        }
+        dragGhost.setInnerHTML("<div class=\"fe-ghost-row\">" + folderIcon(16) + "<span>" + escape(title) + "</span></div>");
+        moveDragGhost(x, y);
+        dragGhost.setInlineStyleProperty("display", "flex");
+    }
+
+    private void moveDragGhost(double x, double y) {
+        if (dragGhost == null) {
+            return;
+        }
+        dragGhost.setInlineStyleProperty("left", px(x + 12));
+        dragGhost.setInlineStyleProperty("top", px(y + 12));
+    }
+
+    private void hideDragGhost() {
+        if (dragGhost != null) {
+            dragGhost.setInlineStyleProperty("display", "none");
+        }
+    }
+
     private void bindButtonHint(String id, String text) {
         Element button = document.getElementById(id);
         if (button == null) {
@@ -2079,6 +2475,35 @@ public final class FileExplorerController {
     private void updateStatusBar() {
         setText("fe-item-count", renderedEntryList.size() + " 个项目");
         setText("fe-selection-count", selected.isEmpty() ? "" : "已选择 " + selected.size() + " 个项目" + selectedSizeText());
+    }
+
+    private void updateStatusViewButtons() {
+        Element details = document.getElementById("fe-view-details");
+        Element thumb = document.getElementById("fe-view-thumb");
+        if (details != null) {
+            if ("details".equals(viewMode)) {
+                details.getClassList().add("active");
+            } else {
+                details.getClassList().remove("active");
+            }
+        }
+        if (thumb != null) {
+            if ("large".equals(viewMode) || "xlarge".equals(viewMode)) {
+                thumb.getClassList().add("active");
+            } else {
+                thumb.getClassList().remove("active");
+            }
+        }
+    }
+
+    private void updateSearchPlaceholder() {
+        Element search = document.getElementById("fe-search");
+        if (search == null) {
+            return;
+        }
+        VirtualFileSystem.Folder folder = fs.folder(currentKey);
+        String name = folder != null ? folder.name : "文件资源管理器";
+        search.setPlaceholder("在 " + name + " 中搜索");
     }
 
     private String selectedSizeText() {
@@ -2141,6 +2566,23 @@ public final class FileExplorerController {
             folder = folder.parentKey == null ? null : fs.folder(folder.parentKey);
         }
         return String.join(" > ", names);
+    }
+
+    private void copyPath(VirtualFileSystem.Entry entry) {
+        String path = pathText(currentKey) + " > " + entry.name;
+        Minecraft.getInstance().keyboardHandler.setClipboard(path);
+        setStatus("已复制路径：" + path);
+    }
+
+    private void sendTo(String targetKey, VirtualFileSystem.Entry entry) {
+        VirtualFileSystem.Folder target = fs.folder(targetKey);
+        if (target == null) {
+            setStatus("目标文件夹不存在");
+            return;
+        }
+        pushUndo(fs.duplicateInto(targetKey, entry));
+        afterMutation();
+        setStatus("已发送到 " + target.name);
     }
 
     // ---------- 工具方法 ----------

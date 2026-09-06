@@ -73,12 +73,15 @@
     min-width: 0;
     display: flex;
     align-items: stretch;
-    overflow: hidden;
+    overflow-x: auto;
+    overflow-y: hidden;
 }
 
 .fe-tab {
-    min-width: 140px;
-    max-width: 240px;
+    flex: 0 0 200px;
+    width: 200px;
+    min-width: 0;
+    max-width: 200px;
     padding: 0 14px;
     display: flex;
     align-items: center;
@@ -134,7 +137,10 @@
 }
 
 .fe-tab-new {
-    flex: 0 0 32px;
+    flex: 0 0 auto;
+    width: 40px;
+    min-width: 40px;
+    max-width: 40px;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -251,6 +257,7 @@
 }
 
 .fe-searchbar {
+    position: relative;
     flex: 0 1 240px;
     min-width: 120px;
 }
@@ -258,8 +265,18 @@
 .fe-searchbar .form-input-2 {
     min-height: 32px;
     height: 32px;
-    padding: 5px 10px;
+    padding: 5px 30px 5px 10px;
     font-size: var(--ore-font-sm);
+}
+
+.fe-search-icon {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    width: 16px;
+    height: 16px;
+    color: var(--ore-ink-muted);
+    pointer-events: none;
 }
 
 /* ---------- 命令栏 ---------- */
@@ -286,6 +303,7 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
+    gap: 6px;
 }
 
 .fe-cmd-btn svg {
@@ -499,7 +517,7 @@
 
 .ore-theme .table.fe-table th,
 .ore-theme .table.fe-table td {
-    padding: 8px 12px;
+    padding: 6px 12px;
     border-right: 2px solid var(--ore-edge);
     border-bottom: 2px solid var(--ore-edge);
     font-size: var(--ore-font-sm);
@@ -538,6 +556,30 @@
 
 .ore-theme .table.fe-table th.sort-active {
     color: var(--ore-gold);
+}
+
+.ore-theme .table.fe-table tr.fe-group-row {
+    cursor: default;
+}
+
+.ore-theme .table.fe-table tbody tr.fe-group-row:hover {
+    background: transparent;
+}
+
+.ore-theme .table.fe-table .fe-group-header {
+    padding: 6px 12px;
+    color: #ffffff;
+    background: var(--ore-surface-deep);
+    border-right: 0;
+    border-bottom: 2px solid var(--ore-edge);
+    font-size: var(--ore-font-sm);
+}
+
+.fe-empty {
+    padding: 24px;
+    color: var(--ore-ink-muted);
+    font-size: var(--ore-font-sm);
+    text-align: center;
 }
 
 .fe-col-resizer {
@@ -679,7 +721,7 @@
     flex: 0 0 26px;
     display: flex;
     align-items: center;
-    gap: 16px;
+    gap: 8px;
     padding: 0 12px;
     color: var(--ore-ink-muted);
     background: var(--ore-surface);
@@ -691,8 +733,48 @@
     white-space: nowrap;
 }
 
+.fe-status-sep {
+    width: 0;
+    height: 14px;
+    border-left: 2px solid var(--ore-edge);
+}
+
 .fe-status-spacer {
     flex: 1 1 auto;
+}
+
+.fe-status-views {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+}
+
+.fe-status-view {
+    width: 28px;
+    height: 22px;
+    padding: 0;
+    border: 0;
+    color: var(--ore-ink-muted);
+    background: transparent;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.fe-status-view:hover {
+    color: #ffffff;
+    background: var(--ore-surface-deep);
+}
+
+.fe-status-view.active {
+    color: #ffffff;
+    background: var(--ore-surface-deep);
+}
+
+.fe-status-view svg {
+    width: 16px;
+    height: 16px;
 }
 
 /* ---------- 框选矩形 ---------- */
@@ -731,6 +813,7 @@
 }
 
 .fe-ctx-item {
+    position: relative;
     min-height: 28px;
     padding: 5px 12px;
     color: var(--ore-ink);
@@ -776,6 +859,50 @@
     margin: 4px 8px;
     border: 0;
     border-top: 2px solid var(--ore-edge);
+}
+
+.fe-ctx-submenu {
+    position: absolute;
+    left: 100%;
+    top: 0;
+    display: none;
+    min-width: 160px;
+    padding: 4px;
+    color: var(--ore-ink);
+    background: var(--ore-surface-deep);
+    border: 3px solid var(--ore-edge);
+    box-shadow: 4px 4px 0 rgba(0, 0, 0, 0.35);
+}
+
+.fe-ctx-item.fe-has-sub:hover > .fe-ctx-submenu {
+    display: block;
+}
+
+/* ---------- 拖拽虚影 ---------- */
+.fe-drag-ghost {
+    position: absolute;
+    z-index: 900;
+    display: none;
+    pointer-events: none;
+    padding: 4px 8px;
+    color: var(--ore-ink);
+    background: var(--ore-surface-deep);
+    border: 2px solid var(--ore-edge);
+    box-shadow: 4px 4px 0 rgba(0, 0, 0, 0.25);
+    opacity: 0.9;
+    font-size: var(--ore-font-sm);
+    white-space: nowrap;
+}
+
+.fe-drag-ghost .fe-ghost-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.fe-drag-ghost svg {
+    width: 16px;
+    height: 16px;
 }
 
 /* 最小化：只保留标题栏。 */
