@@ -1,0 +1,32 @@
+# ---- Gradle ----
+.gradle/
+build/
+out/
+
+# ---- IDE ----
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+.classpath
+.project
+.settings/
+bin/
+
+# ---- Minecraft 开发运行产物（每个 target 下都有） ----
+run/
+logs/
+crash-reports/
+screenshots/
+debug/
+*.log
+*.lck
+
+# ---- 系统文件 ----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- Java 编译产物（防御性，正常都在 build/ 内） ----
+*.class

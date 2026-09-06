@@ -1,0 +1,882 @@
+/* Windows 文件资源管理器窗口布局。
+ * 结构：标题栏(标签页+窗口控制) -> 导航栏(后退/前进/上级 + 面包屑 + 搜索) -> 命令栏(操作 + 排序/视图 + 预览) -> 导航窗格/内容区/预览窗格 -> 状态栏。
+ * 视觉复用 Ore 主题 token 与组件。 */
+
+/* 字体强制微软雅黑。 */
+.fe-body,
+.fe,
+.fe *,
+.fe-trigger-body,
+.fe-trigger-body * {
+    font-family: "Microsoft YaHei", "微软雅黑", sans-serif !important;
+}
+
+/* 页面根：点击穿透，只有窗口本体接收指针事件。 */
+.fe-body {
+    margin: 0;
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden;
+    background: transparent;
+    pointer-events: none;
+    user-select: none;
+}
+
+/* 拖拽/框选期间的全局鼠标捕获层。 */
+.fe-capture {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    z-index: 9999;
+    pointer-events: none;
+}
+
+/* ---------- 窗口 ---------- */
+.fe {
+    position: absolute;
+    z-index: 100;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    color: var(--ore-ink);
+    background: var(--ore-canvas);
+    border: 3px solid var(--ore-edge);
+    box-shadow: inset 2px 2px var(--ore-edge-light), inset -2px -2px var(--ore-edge);
+    pointer-events: auto;
+    user-select: none;
+}
+
+* {
+    user-select: none !important;
+}
+
+.fe input,
+.fe textarea,
+.fe-rename-input {
+    user-select: text !important;
+}
+
+/* ---------- 标题栏：标签页 + 窗口控制 ---------- */
+.fe-titlebar {
+    flex: 0 0 40px;
+    display: flex;
+    align-items: stretch;
+    background: var(--ore-surface-deep);
+    border-bottom: 3px solid var(--ore-edge);
+}
+
+.fe-tabstrip {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    align-items: stretch;
+    overflow: hidden;
+}
+
+.fe-tab {
+    min-width: 140px;
+    max-width: 240px;
+    padding: 0 14px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--ore-ink-muted);
+    background: var(--ore-surface-deep);
+    border-right: 2px solid var(--ore-edge);
+    cursor: default;
+}
+
+.fe-tab.active {
+    color: #ffffff;
+    background: var(--ore-surface);
+    box-shadow:
+        inset 0 -4px var(--ore-green-shadow),
+        inset 3px 3px rgba(255, 255, 255, 0.25),
+        inset -3px -6px rgba(255, 255, 255, 0.12);
+}
+
+.fe-tab-icon {
+    flex: 0 0 16px;
+    width: 16px;
+    height: 16px;
+    color: var(--ore-gold);
+}
+
+.fe-tab-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.fe-tab-close {
+    margin-left: auto;
+    flex: 0 0 14px;
+    width: 14px;
+    height: 14px;
+    color: var(--ore-ink-muted);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.fe-tab-close:hover {
+    color: #ffffff;
+    background: var(--ore-red);
+}
+
+.fe-tab-close svg {
+    width: 12px;
+    height: 12px;
+}
+
+.fe-tab-new {
+    flex: 0 0 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--ore-ink-muted);
+    background: transparent;
+    border: 0;
+    cursor: pointer;
+}
+
+.fe-tab-new:hover {
+    color: #ffffff;
+    background: var(--ore-surface);
+}
+
+.fe-tab-new svg {
+    width: 12px;
+    height: 12px;
+}
+
+.fe-window-controls {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: stretch;
+}
+
+.fe-window-btn {
+    width: 46px;
+    padding: 0;
+    border: 0;
+    border-left: 2px solid var(--ore-edge);
+    color: #ffffff;
+    background: transparent;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.fe-window-btn:hover {
+    background: var(--ore-surface);
+}
+
+.fe-window-close:hover {
+    background: var(--ore-red);
+}
+
+.fe-window-btn svg {
+    width: 14px;
+    height: 14px;
+}
+
+/* ---------- 导航栏：后退/前进/上级 + 面包屑 + 搜索 ---------- */
+.fe-addressbar {
+    flex: 0 0 44px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 0 8px;
+    background: var(--ore-surface-deep);
+    border-bottom: 3px solid var(--ore-edge);
+}
+
+.fe-addressbar .icon-button {
+    flex: 0 0 28px;
+    width: 28px;
+    height: 28px;
+    padding: 2px;
+}
+
+.fe-tool-btn svg {
+    width: 15px;
+    height: 15px;
+}
+
+.fe-breadcrumb {
+    flex: 1 1 auto;
+    min-width: 0;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding: 0 8px;
+    background: var(--ore-surface-deep);
+    border: 2px solid var(--ore-edge);
+    box-shadow: inset 0 4px var(--ore-canvas);
+    overflow: hidden;
+    white-space: nowrap;
+}
+
+.fe-crumb {
+    padding: 3px 8px;
+    color: var(--ore-ink);
+    cursor: pointer;
+    font-size: var(--ore-font-sm);
+}
+
+.fe-crumb:hover {
+    color: #ffffff;
+    background: var(--ore-surface);
+}
+
+.fe-crumb.current {
+    color: var(--ore-ink-muted);
+    cursor: default;
+}
+
+.fe-crumb.current:hover {
+    background: transparent;
+}
+
+.fe-crumb-sep {
+    flex: 0 0 auto;
+    color: var(--ore-edge-light);
+}
+
+.fe-searchbar {
+    flex: 0 1 240px;
+    min-width: 120px;
+}
+
+.fe-searchbar .form-input-2 {
+    min-height: 32px;
+    height: 32px;
+    padding: 5px 10px;
+    font-size: var(--ore-font-sm);
+}
+
+/* ---------- 命令栏 ---------- */
+.fe-commandbar {
+    flex: 0 0 40px;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding: 0 8px;
+    background: var(--ore-surface);
+    border-bottom: 3px solid var(--ore-edge);
+}
+
+.fe-cmd-btn {
+    min-height: 30px;
+    min-width: 32px;
+    padding: 4px 8px;
+    border: 2px solid transparent;
+    color: var(--ore-ink);
+    background: transparent;
+    cursor: pointer;
+    font-size: var(--ore-font-sm);
+    white-space: nowrap;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.fe-cmd-btn svg {
+    width: 16px;
+    height: 16px;
+}
+
+.fe-cmd-btn:hover {
+    color: #ffffff;
+    background: var(--ore-surface-deep);
+    border-color: var(--ore-edge);
+}
+
+.fe-cmd-btn:active {
+    background: var(--ore-surface-deep);
+}
+
+.fe-cmd-btn.disabled,
+.fe-cmd-btn[aria-disabled="true"] {
+    color: var(--ore-ink-muted);
+    background: transparent;
+    border-color: transparent;
+    cursor: default;
+}
+
+.fe-cmd-btn.disabled:hover,
+.fe-cmd-btn[aria-disabled="true"]:hover {
+    color: var(--ore-ink-muted);
+    background: transparent;
+    border-color: transparent;
+}
+
+.fe-cmd-sep {
+    width: 0;
+    height: 22px;
+    margin: 0 6px;
+    border-left: 2px solid var(--ore-edge);
+}
+
+.fe-cmd-spacer {
+    flex: 1 1 auto;
+}
+
+/* ---------- 主体：导航窗格 + 内容区 + 预览窗格 ---------- */
+.fe-body-area {
+    flex: 1 1 auto;
+    display: flex;
+    min-height: 0;
+}
+
+.fe-nav {
+    flex: 0 0 240px;
+    min-width: 0;
+    overflow: auto;
+    padding: 6px 0;
+    background: var(--ore-surface-deep);
+    border-right: 3px solid var(--ore-edge);
+}
+
+.fe-main {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.fe-content {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    background: var(--ore-canvas);
+}
+
+.fe-preview-pane {
+    flex: 0 0 240px;
+    min-width: 0;
+    overflow: auto;
+    padding: 14px 12px;
+    background: var(--ore-surface-deep);
+    border-left: 3px solid var(--ore-edge);
+    color: var(--ore-ink);
+    display: none;
+}
+
+.fe-preview-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: 12px;
+}
+
+.fe-preview-name {
+    color: #ffffff;
+    font-size: var(--ore-font-md);
+    margin-bottom: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.fe-preview-line {
+    color: var(--ore-ink-muted);
+    font-size: var(--ore-font-sm);
+    margin-bottom: 4px;
+}
+
+.fe-preview-empty {
+    color: var(--ore-ink-muted);
+    font-size: var(--ore-font-sm);
+}
+
+.fe-details-pane {
+    flex: 0 0 auto;
+    max-height: 140px;
+    min-height: 0;
+    overflow: auto;
+    padding: 10px 12px;
+    background: var(--ore-surface-deep);
+    border-top: 3px solid var(--ore-edge);
+    color: var(--ore-ink);
+    display: none;
+}
+
+.fe-details-name {
+    color: #ffffff;
+    font-size: var(--ore-font-md);
+    margin-bottom: 8px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.fe-details-line {
+    color: var(--ore-ink-muted);
+    font-size: var(--ore-font-sm);
+    margin-bottom: 2px;
+}
+
+.fe-details-empty {
+    color: var(--ore-ink-muted);
+    font-size: var(--ore-font-sm);
+}
+
+.fe-nav-title {
+    padding: 6px 12px 2px;
+    color: var(--ore-ink-muted);
+    font-size: var(--ore-font-sm);
+    white-space: nowrap;
+}
+
+.fe-nav-item {
+    min-height: 32px;
+    padding: 0 8px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--ore-ink);
+    cursor: pointer;
+    font-size: var(--ore-font-sm);
+    white-space: nowrap;
+}
+
+.fe-nav-item:hover {
+    color: #ffffff;
+    background: var(--ore-surface);
+}
+
+.fe-nav-item.selected {
+    color: #ffffff;
+    background: var(--ore-surface);
+    box-shadow: inset 3px 0 var(--ore-green);
+}
+
+.fe-nav-item > svg {
+    flex: 0 0 16px;
+    width: 16px;
+    height: 16px;
+}
+
+.fe-nav-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.fe-chevron {
+    flex: 0 0 18px;
+    width: 18px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.fe-chevron svg {
+    width: 12px;
+    height: 12px;
+    color: var(--ore-ink-muted);
+}
+
+.fe-chevron-empty {
+    flex: 0 0 18px;
+    width: 18px;
+}
+
+/* ---------- 列表视图 ---------- */
+.ore-theme .table.fe-table {
+    width: 100%;
+    border: 0;
+    background: var(--ore-canvas);
+}
+
+.ore-theme .table.fe-table th,
+.ore-theme .table.fe-table td {
+    padding: 8px 12px;
+    border-right: 2px solid var(--ore-edge);
+    border-bottom: 2px solid var(--ore-edge);
+    font-size: var(--ore-font-sm);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ore-theme .table.fe-table th {
+    position: relative;
+    color: #ffffff;
+    background: var(--ore-surface-deep);
+}
+
+.ore-theme .table.fe-table tbody tr {
+    cursor: pointer;
+}
+
+.ore-theme .table.fe-table tbody tr:hover {
+    background: var(--ore-surface);
+}
+
+.ore-theme .table.fe-table tbody tr.selected,
+.ore-theme .table.fe-table tbody tr.selected:hover {
+    color: #ffffff;
+    background: var(--ore-blue);
+}
+
+.ore-theme .table.fe-table th.sortable {
+    cursor: pointer;
+}
+
+.ore-theme .table.fe-table th.sortable:hover {
+    background: var(--ore-surface);
+}
+
+.ore-theme .table.fe-table th.sort-active {
+    color: var(--ore-gold);
+}
+
+.fe-col-resizer {
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 6px;
+    height: 100%;
+    cursor: col-resize;
+}
+
+.fe-col-resizer:hover {
+    background: var(--ore-edge-light);
+}
+
+.fe-cell {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+
+.fe-cell > svg {
+    flex: 0 0 16px;
+    width: 16px;
+    height: 16px;
+}
+
+.fe-name-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* ---------- 图标视图 ---------- */
+.fe-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+    gap: 4px;
+    padding: 12px;
+}
+
+.fe-grid-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    padding: 10px 6px;
+    border: 2px solid transparent;
+    color: var(--ore-ink);
+    cursor: pointer;
+}
+
+.fe-grid-item:hover {
+    border-color: var(--ore-edge-light);
+    background: var(--ore-surface-deep);
+}
+
+.fe-grid-item.selected,
+.fe-grid-item.selected:hover {
+    border-color: var(--ore-blue);
+    background: var(--ore-surface);
+}
+
+.fe-grid-item .fe-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.fe-grid-item .fe-icon svg {
+    display: block;
+}
+
+.fe-grid-item .fe-name {
+    max-width: 100%;
+    text-align: center;
+    font-size: var(--ore-font-sm);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* ---------- 列表视图 ---------- */
+.fe-list {
+    display: flex;
+    flex-direction: column;
+    padding: 4px 0;
+}
+
+.fe-list-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    color: var(--ore-ink);
+    cursor: pointer;
+}
+
+.fe-list-item:hover {
+    background: var(--ore-surface);
+}
+
+.fe-list-item.selected,
+.fe-list-item.selected:hover {
+    color: #ffffff;
+    background: var(--ore-blue);
+}
+
+.fe-list-item .fe-icon {
+    flex: 0 0 16px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.fe-list-item .fe-icon svg {
+    display: block;
+}
+
+.fe-list-item .fe-name-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* 紧凑视图 */
+.fe-content.fe-compact .table.fe-table th,
+.fe-content.fe-compact .table.fe-table td {
+    padding: 4px 12px;
+}
+
+.fe-content.fe-compact .fe-list-item {
+    padding: 3px 12px;
+}
+
+/* ---------- 状态栏 ---------- */
+.fe-statusbar {
+    flex: 0 0 26px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 0 12px;
+    color: var(--ore-ink-muted);
+    background: var(--ore-surface);
+    border-top: 3px solid var(--ore-edge);
+    font-size: var(--ore-font-sm);
+}
+
+.fe-statusbar span {
+    white-space: nowrap;
+}
+
+.fe-status-spacer {
+    flex: 1 1 auto;
+}
+
+/* ---------- 框选矩形 ---------- */
+.fe-selection-rect {
+    position: absolute;
+    z-index: 500;
+    display: none;
+    pointer-events: none;
+    border: 2px solid var(--ore-info);
+    background: rgba(88, 166, 210, 0.15);
+}
+
+/* ---------- 右键菜单 ---------- */
+.fe-ctx-menu {
+    position: absolute;
+    z-index: 600;
+    display: none;
+    min-width: 200px;
+    padding: 4px;
+    pointer-events: auto;
+    color: var(--ore-ink);
+    background: var(--ore-surface-deep);
+    border: 3px solid var(--ore-edge);
+    box-shadow: 4px 4px 0 rgba(0, 0, 0, 0.35);
+}
+
+.fe-ctx-header {
+    padding: 5px 12px;
+    color: var(--ore-ink-muted);
+    font-size: var(--ore-font-sm);
+    border-bottom: 2px solid var(--ore-edge);
+    margin-bottom: 4px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.fe-ctx-item {
+    min-height: 28px;
+    padding: 5px 12px;
+    color: var(--ore-ink);
+    font-size: var(--ore-font-sm);
+    cursor: pointer;
+    white-space: nowrap;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.fe-ctx-mark {
+    flex: 0 0 16px;
+    width: 16px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.fe-ctx-label {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.fe-ctx-item:hover {
+    color: #ffffff;
+    background: var(--ore-green);
+}
+
+.fe-ctx-item.danger {
+    color: var(--ore-danger);
+}
+
+.fe-ctx-item.danger:hover {
+    color: #ffffff;
+    background: var(--ore-red);
+}
+
+.fe-ctx-sep {
+    height: 0;
+    margin: 4px 8px;
+    border: 0;
+    border-top: 2px solid var(--ore-edge);
+}
+
+/* 最小化：只保留标题栏。 */
+.fe.fe-minimized .fe-commandbar,
+.fe.fe-minimized .fe-addressbar,
+.fe.fe-minimized .fe-body-area,
+.fe.fe-minimized .fe-statusbar,
+.fe.fe-minimized .fe-resize {
+    display: none;
+}
+
+/* ---------- 窗口缩放热区 ---------- */
+.fe-resize {
+    position: absolute;
+    z-index: 50;
+}
+
+.fe-resize-n { top: 0; left: 8px; right: 8px; height: 8px; cursor: n-resize; }
+.fe-resize-s { bottom: 0; left: 8px; right: 8px; height: 8px; cursor: s-resize; }
+.fe-resize-e { right: 0; top: 8px; bottom: 8px; width: 8px; cursor: e-resize; }
+.fe-resize-w { left: 0; top: 8px; bottom: 8px; width: 8px; cursor: w-resize; }
+.fe-resize-ne { top: 0; right: 0; width: 14px; height: 14px; cursor: ne-resize; }
+.fe-resize-nw { top: 0; left: 0; width: 14px; height: 14px; cursor: nw-resize; }
+.fe-resize-se { bottom: 0; right: 0; width: 14px; height: 14px; cursor: se-resize; }
+.fe-resize-sw { bottom: 0; left: 0; width: 14px; height: 14px; cursor: sw-resize; }
+
+.fe-resize-se svg {
+    position: absolute;
+    right: 1px;
+    bottom: 1px;
+    width: 12px;
+    height: 12px;
+}
+
+/* ---------- 重命名输入框 ---------- */
+.fe-rename-input {
+    position: absolute;
+    z-index: 700;
+    display: none;
+    min-width: 180px;
+    min-height: 30px;
+    padding: 5px 8px;
+    border: 2px solid var(--ore-edge);
+    color: #ffffff;
+    background: var(--ore-surface-deep);
+    box-shadow: inset 0 4px var(--ore-canvas);
+    font-size: var(--ore-font-sm);
+}
+
+/* ---------- 悬停元数据提示（跟随鼠标，多行） ---------- */
+.fe-tooltip {
+    position: absolute;
+    z-index: 650;
+    display: none;
+    pointer-events: none;
+    max-width: 360px;
+    padding: 6px 10px;
+    color: var(--ore-ink);
+    background: var(--ore-surface-deep);
+    border: 2px solid var(--ore-edge);
+    font-size: var(--ore-font-sm);
+    white-space: pre-line;
+}
+
+/* ---------- 复选框选择 ---------- */
+.fe-check {
+    flex: 0 0 16px;
+    width: 16px;
+    height: 16px;
+    border: 2px solid var(--ore-edge-light);
+    background: var(--ore-surface-deep);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.fe-check.checked {
+    background: var(--ore-green);
+    border-color: var(--ore-green);
+}
+
+/* ---------- 左上角打开按钮（独立 Overlay） ---------- */
+.fe-trigger-body {
+    margin: 0;
+    width: 100vw;
+    height: 100vh;
+    pointer-events: none;
+    background: transparent;
+}
+
+.fe-trigger-btn {
+    position: fixed;
+    top: 8px;
+    left: 8px;
+    z-index: 40;
+    pointer-events: auto;
+    color: var(--ore-gold);
+}
+
+.fe-trigger-btn svg {
+    width: 22px;
+    height: 22px;
+}
