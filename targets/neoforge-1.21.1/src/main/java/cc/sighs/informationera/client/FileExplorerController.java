@@ -126,18 +126,9 @@ public final class FileExplorerController {
     private int resizeColIndex = -1;
     private double colResizeStartX;
     private double colResizeStartWidth;
+    private double navWidth = 240;
+    private double previewWidth = 240;
 
-    private boolean pendingDrag = false;
-    private boolean dragActive = false;
-    private double dragStartX;
-    private double dragStartY;
-    private VirtualFileSystem.Entry dragEntry;
-    private String dragSourceKey;
-
-    private boolean pendingRightDrag = false;
-    private boolean rightDragActive = false;
-    private double rightDragStartX;
-    private double rightDragStartY;
     private VirtualFileSystem.Entry rightDragEntry;
     private String rightDragSourceKey;
     private String rightDropTargetKey;
@@ -201,6 +192,7 @@ public final class FileExplorerController {
         renderContent();
         renderNavigationState();
         renderBreadcrumb();
+        applyPaneWidths();
         applyNavVisibility();
         applyPreviewVisibility();
         updatePreview();
@@ -323,6 +315,15 @@ public final class FileExplorerController {
             handle.addEventListener("mousedown", e -> {
                 if (e instanceof MouseEvent me && me.button == 0) {
                     beginResize(direction, me.clientX, me.clientY);
+                }
+            });
+        }
+
+        for (Element resizer : document.querySelectorAll(".fe-pane-resizer")) {
+            String handle = resizer.getAttribute("data-resize");
+            resizer.addEventListener("mousedown", e -> {
+                if (e instanceof MouseEvent me && me.button == 0) {
+                    beginResize(handle, me.clientX, me.clientY);
                 }
             });
         }
@@ -764,6 +765,11 @@ public final class FileExplorerController {
         startWinY = windowY;
         startWinW = windowWidth;
         startWinH = windowHeight;
+        if ("nav".equals(handle)) {
+            startWinW = navWidth;
+        } else if ("preview".equals(handle)) {
+            startWinW = previewWidth;
+        }
         activateCapture();
     }
 
@@ -799,6 +805,17 @@ public final class FileExplorerController {
         renderContent();
     }
 
+    private void applyPaneWidths() {
+        Element nav = document.getElementById("fe-nav");
+        if (nav != null) {
+            nav.setInlineStyleProperty("width", px(navWidth));
+        }
+        Element preview = document.getElementById("fe-preview-pane");
+        if (preview != null) {
+            preview.setInlineStyleProperty("width", px(previewWidth));
+        }
+    }
+
     private void activateCapture() {
         if (capture != null) {
             capture.setInlineStyleProperty("pointer-events", "auto");
@@ -829,6 +846,17 @@ public final class FileExplorerController {
     private void applyResize(double mouseX, double mouseY) {
         double dx = mouseX - startMouseX;
         double dy = mouseY - startMouseY;
+        if ("nav".equals(resizeHandle)) {
+            navWidth = Math.max(120, startWinW + dx);
+            applyPaneWidths();
+            return;
+        }
+        if ("preview".equals(resizeHandle)) {
+            // 预览窗格在右侧，向右拖动分隔条会让预览变窄。
+            previewWidth = Math.max(120, startWinW - dx);
+            applyPaneWidths();
+            return;
+        }
         double x = startWinX;
         double y = startWinY;
         double w = startWinW;
@@ -981,45 +1009,40 @@ public final class FileExplorerController {
         applyWindowGeometry();
     }
 
-    // ---------- 拖拽移动/复制 ----------
-
-    private void dropAt(double x, double y, boolean copy) {
-        if (dragEntry == null || dragSourceKey == null) {
-            return;
-        }
-        Element target = document.hitTest(new Position(x, y));
-        if (target == null) {
-            return;
-        }
-        Element folderEl = target.closest("[data-path]");
-        if (folderEl == null) {
-            return;
-        }
-        String targetKey = folderEl.getAttribute("data-path");
-        if (targetKey == null) {
-            return;
-        }
-        if (dragEntry.folder && dragEntry.childKey != null && targetKey.startsWith(dragEntry.childKey)) {
-            setStatus("不能移动到自身内部");
-            return;
-        }
-        if (targetKey.equals(dragSourceKey) && !copy) {
-            return;
-        }
-        if (copy) {
-            pushUndo(fs.duplicateInto(targetKey, dragEntry));
-            setStatus("已复制到目标文件夹");
-        } else {
-            pushUndo(fs.move(dragSourceKey, targetKey, dragEntry));
-            setStatus("已移动到目标文件夹");
-        }
-        afterMutation();
-    }
-
     // ---------- 跨窗口拖拽原语（由 FileExplorerWindow 全局引擎调用） ----------
 
     String ghostHtmlFor(VirtualFileSystem.Entry entry) {
         return "<div class=\"fe-ghost-row\">" + iconFor(entry, 16) + "<span>" + escape(entry.name) + "</span></div>";
+    }
+
+    /** 命中本窗口内需要覆盖系统光标的元素：ew/ns/nwse/pointer；无匹配返回 null。 */
+    String resolveCursorKind(Position screenPos) {
+        if (document == null || !document.isActive()) {
+            return null;
+        }
+        Position p = document.screenToDocumentPosition(screenPos);
+        Element hit = document.hitTest(p);
+        if (hit == null) {
+            return null;
+        }
+        if (hit.closest(".fe-resize-n") != null || hit.closest(".fe-resize-s") != null) {
+            return "ns";
+        }
+        if (hit.closest(".fe-resize-e") != null || hit.closest(".fe-resize-w") != null
+                || hit.closest(".fe-col-resizer") != null || hit.closest(".fe-pane-resizer") != null) {
+            return "ew";
+        }
+        if (hit.closest(".fe-resize-ne") != null || hit.closest(".fe-resize-nw") != null
+                || hit.closest(".fe-resize-se") != null || hit.closest(".fe-resize-sw") != null) {
+            return "nwse";
+        }
+        if (hit.closest(".fe-cmd-btn") != null || hit.closest(".fe-tool-btn") != null
+                || hit.closest(".fe-tab-close") != null || hit.closest(".fe-window-btn") != null
+                || hit.closest(".fe-tab-new") != null || hit.closest(".fe-nav-item") != null
+                || hit.closest(".fe-crumb") != null || hit.closest(".fe-status-view") != null) {
+            return "pointer";
+        }
+        return null;
     }
 
     /** 把屏幕坐标换算成本窗口文档坐标后，命中一个可放置目标（文件夹行，或内容区空白=当前文件夹）。 */
@@ -1689,6 +1712,10 @@ public final class FileExplorerController {
         if (nav != null) {
             nav.setInlineStyleProperty("display", showNav ? "block" : "none");
         }
+        Element resizer = document.getElementById("fe-nav-resizer");
+        if (resizer != null) {
+            resizer.setInlineStyleProperty("display", showNav ? "block" : "none");
+        }
     }
 
     private void togglePreview() {
@@ -1701,6 +1728,10 @@ public final class FileExplorerController {
         Element pane = document.getElementById("fe-preview-pane");
         if (pane != null) {
             pane.setInlineStyleProperty("display", previewOpen ? "block" : "none");
+        }
+        Element resizer = document.getElementById("fe-preview-resizer");
+        if (resizer != null) {
+            resizer.setInlineStyleProperty("display", previewOpen ? "block" : "none");
         }
     }
 
@@ -2265,7 +2296,7 @@ public final class FileExplorerController {
         for (Element item : document.querySelectorAll(".fe-item")) {
             item.addEventListener("click", e -> handleItemClick(item, e));
             item.addEventListener("contextmenu", e -> {
-                if (rightDragActive) {
+                if (FileExplorerWindow.isRightDragActive()) {
                     return;
                 }
                 e.stopPropagation();
@@ -2420,15 +2451,6 @@ public final class FileExplorerController {
         if (tooltip != null) {
             tooltip.setInlineStyleProperty("display", "none");
         }
-    }
-
-    private void showDragGhost(VirtualFileSystem.Entry entry, double x, double y) {
-        if (dragGhost == null || entry == null) {
-            return;
-        }
-        dragGhost.setInnerHTML("<div class=\"fe-ghost-row\">" + iconFor(entry, 16) + "<span>" + escape(entry.name) + "</span></div>");
-        moveDragGhost(x, y);
-        dragGhost.setInlineStyleProperty("display", "flex");
     }
 
     private void showTabGhost(String title, double x, double y) {

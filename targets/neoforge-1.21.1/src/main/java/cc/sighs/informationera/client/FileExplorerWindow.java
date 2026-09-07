@@ -76,6 +76,11 @@ public final class FileExplorerWindow {
         return fs;
     }
 
+    /** 右键拖拽是否正在进行（用于抑制拖拽期间的右键菜单）。 */
+    public static boolean isRightDragActive() {
+        return dragSource != null && dragRight && dragActive;
+    }
+
     /** 源窗口在文件项按下左/右键时调用一次，登记一次潜在拖拽。 */
     public static void beginFileDrag(FileExplorerController source, VirtualFileSystem.Entry entry,
                                      String sourceKey, boolean right) {
@@ -174,6 +179,25 @@ public final class FileExplorerWindow {
         for (FileExplorerController controller : windows) {
             if (controller.document() == document) {
                 return controller;
+            }
+        }
+        return null;
+    }
+
+    /** 鼠标下最上层窗口的光标类型：ew/ns/nwse/pointer；无匹配返回 null。 */
+    static String resolveCursorKind(Position screenPos) {
+        List<Document> layered = DocumentLayerOrder.frontToBack(Document.getAll());
+        if (layered == null) {
+            return null;
+        }
+        for (Document document : layered) {
+            FileExplorerController controller = controllerFor(document);
+            if (controller == null) {
+                continue;
+            }
+            String kind = controller.resolveCursorKind(screenPos);
+            if (kind != null) {
+                return kind;
             }
         }
         return null;
