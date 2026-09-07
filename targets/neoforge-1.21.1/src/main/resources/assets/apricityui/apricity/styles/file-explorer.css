@@ -992,6 +992,8 @@
     height: 100vh;
     pointer-events: none;
     background: transparent;
+    /* 提升整个 Overlay 的层叠，确保入口按钮与拖拽虚影位于所有窗口之上。 */
+    transform: translateZ(1000px);
 }
 
 .fe-trigger-btn {

@@ -158,15 +158,21 @@ public final class FileExplorerController {
         return ACTIVE;
     }
 
+    public static void setActive(FileExplorerController controller) {
+        ACTIVE = controller;
+    }
+
     public boolean isOpen() {
         return document != null && document.isActive();
     }
 
+    Document document() {
+        return document;
+    }
+
     public void closeWindow() {
         closeContextMenu();
-        if (ACTIVE == this) {
-            ACTIVE = null;
-        }
+        FileExplorerWindow.unregister(this);
         if (document != null) {
             document.remove();
             document = null;
@@ -410,29 +416,7 @@ public final class FileExplorerController {
             if (!(e instanceof MouseEvent me)) {
                 return;
             }
-            if (pendingDrag && !dragActive) {
-                double dx = me.clientX - dragStartX;
-                double dy = me.clientY - dragStartY;
-                if (dx * dx + dy * dy > 25) {
-                    dragActive = true;
-                    showDragGhost(dragEntry, me.clientX, me.clientY);
-                }
-            }
-            if (dragActive) {
-                moveDragGhost(me.clientX, me.clientY);
-            }
-            if (pendingRightDrag && !rightDragActive) {
-                double dx = me.clientX - rightDragStartX;
-                double dy = me.clientY - rightDragStartY;
-                if (dx * dx + dy * dy > 25) {
-                    rightDragActive = true;
-                    closeContextMenu();
-                    showDragGhost(rightDragEntry, me.clientX, me.clientY);
-                }
-            }
-            if (rightDragActive) {
-                moveDragGhost(me.clientX, me.clientY);
-            }
+            // 文件拖拽（左/右键）由 FileExplorerWindow 的全局引擎处理，支持跨窗口。
             if (tabDragIndex >= 0 && !tabDragActive) {
                 double dx = me.clientX - tabDragStartX;
                 double dy = me.clientY - tabDragStartY;
@@ -450,22 +434,6 @@ public final class FileExplorerController {
             if (!(e instanceof MouseEvent me)) {
                 return;
             }
-            if (dragActive) {
-                dropAt(me.clientX, me.clientY, me.controlKey);
-            }
-            if (rightDragActive) {
-                resolveRightDropTarget(me.clientX, me.clientY);
-                showDropMenu(me.clientX, me.clientY);
-            }
-            pendingDrag = false;
-            dragActive = false;
-            dragEntry = null;
-            dragSourceKey = null;
-            pendingRightDrag = false;
-            rightDragActive = false;
-            rightDragEntry = null;
-            rightDragSourceKey = null;
-            rightDropTargetKey = null;
             if (tabDragActive && tabDragIndex >= 0) {
                 int target = tabIndexAt(me.clientX);
                 if (target >= 0 && target != tabDragIndex) {
@@ -1048,49 +1016,93 @@ public final class FileExplorerController {
         afterMutation();
     }
 
-    private void resolveRightDropTarget(double x, double y) {
-        rightDropTargetKey = null;
-        Element target = document.hitTest(new Position(x, y));
-        if (target == null) {
-            return;
-        }
-        Element folderEl = target.closest("[data-path]");
-        if (folderEl != null) {
-            rightDropTargetKey = folderEl.getAttribute("data-path");
-        }
+    // ---------- 跨窗口拖拽原语（由 FileExplorerWindow 全局引擎调用） ----------
+
+    String ghostHtmlFor(VirtualFileSystem.Entry entry) {
+        return "<div class=\"fe-ghost-row\">" + iconFor(entry, 16) + "<span>" + escape(entry.name) + "</span></div>";
     }
 
-    private void showDropMenu(double x, double y) {
+    /** 把屏幕坐标换算成本窗口文档坐标后，命中一个可放置目标（文件夹行，或内容区空白=当前文件夹）。 */
+    FileExplorerWindow.DropTarget hitDropTarget(Position screenPos) {
+        if (document == null || !document.isActive()) {
+            return null;
+        }
+        Position p = document.screenToDocumentPosition(screenPos);
+        Element hit = document.hitTest(p);
+        if (hit == null) {
+            return null;
+        }
+        Element folderEl = hit.closest("[data-path]");
+        if (folderEl != null) {
+            String key = folderEl.getAttribute("data-path");
+            if (key != null) {
+                return new FileExplorerWindow.DropTarget(this, key);
+            }
+        }
+        if (hit.closest(".fe-content") != null) {
+            return new FileExplorerWindow.DropTarget(this, currentKey);
+        }
+        return null;
+    }
+
+    /** 执行一次移动/复制；成功返回 true 并刷新自身。 */
+    boolean moveOrCopy(String sourceKey, VirtualFileSystem.Entry entry, String targetKey, boolean copy) {
+        if (entry.folder && entry.childKey != null && targetKey.startsWith(entry.childKey)) {
+            setStatus("不能移动到自身内部");
+            return false;
+        }
+        if (targetKey.equals(sourceKey) && !copy) {
+            return false;
+        }
+        if (copy) {
+            pushUndo(fs.duplicateInto(targetKey, entry));
+            setStatus("已复制到目标文件夹");
+        } else {
+            pushUndo(fs.move(sourceKey, targetKey, entry));
+            setStatus("已移动到目标文件夹");
+        }
+        afterMutation();
+        return true;
+    }
+
+    /** 其它窗口发生了文件变更，刷新本窗口的显示。 */
+    void refreshAfterExternal() {
+        afterMutation();
+    }
+
+    /** 右键拖拽跨窗口落下：在当前窗口弹出“移动到此处/复制到此处”菜单。 */
+    void showExternalDropMenu(VirtualFileSystem.Entry entry, String sourceKey, String targetKey,
+                              Position screenPos, FileExplorerController sourceController) {
+        rightDragEntry = entry;
+        rightDragSourceKey = sourceKey;
+        rightDropTargetKey = targetKey;
+        Position p = document.screenToDocumentPosition(screenPos);
+        showDropMenuFor(p.x, p.y, sourceController);
+    }
+
+    private void showDropMenuFor(double x, double y, FileExplorerController sourceController) {
         if (rightDragEntry == null || rightDragSourceKey == null) {
             return;
         }
         List<CtxEntry> entries = new ArrayList<>();
         entries.add(CtxEntry.header(rightDragEntry.name));
-        entries.add(CtxEntry.action("移动到此处", () -> performRightDrop(false)));
-        entries.add(CtxEntry.action("复制到此处", () -> performRightDrop(true)));
+        entries.add(CtxEntry.action("移动到此处", () -> performRightDrop(false, sourceController)));
+        entries.add(CtxEntry.action("复制到此处", () -> performRightDrop(true, sourceController)));
         entries.add(CtxEntry.separator());
         entries.add(CtxEntry.action("取消", () -> {
         }));
         openContextMenu(x, y, entries);
     }
 
-    private void performRightDrop(boolean copy) {
+    private void performRightDrop(boolean copy, FileExplorerController sourceController) {
         if (rightDragEntry == null || rightDragSourceKey == null || rightDropTargetKey == null) {
             setStatus("无法放置到此位置");
             return;
         }
-        if (rightDragEntry.folder && rightDragEntry.childKey != null && rightDropTargetKey.startsWith(rightDragEntry.childKey)) {
-            setStatus("不能移动到自身内部");
-            return;
+        sourceController.moveOrCopy(rightDragSourceKey, rightDragEntry, rightDropTargetKey, copy);
+        if (sourceController != this) {
+            refreshAfterExternal();
         }
-        if (copy) {
-            pushUndo(fs.duplicateInto(rightDropTargetKey, rightDragEntry));
-            setStatus("已复制到目标文件夹");
-        } else {
-            pushUndo(fs.move(rightDragSourceKey, rightDropTargetKey, rightDragEntry));
-            setStatus("已移动到目标文件夹");
-        }
-        afterMutation();
     }
 
     // ---------- 右键菜单（自绘，Ore 主题） ----------
@@ -1314,7 +1326,7 @@ public final class FileExplorerController {
         return h;
     }
 
-    private void closeContextMenu() {
+    void closeContextMenu() {
         contextMenuOpen = false;
         Element menu = document.getElementById("fe-context-menu");
         if (menu != null) {
@@ -2263,20 +2275,12 @@ public final class FileExplorerController {
             });
             item.addEventListener("mousedown", e -> {
                 if (e instanceof MouseEvent me) {
-                    if (me.button == 0) {
-                        pendingDrag = true;
-                        dragActive = false;
-                        dragStartX = me.clientX;
-                        dragStartY = me.clientY;
-                        dragEntry = entryFor(item);
-                        dragSourceKey = currentKey;
-                    } else if (me.button == 2) {
-                        pendingRightDrag = true;
-                        rightDragActive = false;
-                        rightDragStartX = me.clientX;
-                        rightDragStartY = me.clientY;
-                        rightDragEntry = entryFor(item);
-                        rightDragSourceKey = currentKey;
+                    VirtualFileSystem.Entry entry = entryFor(item);
+                    if (entry == null) {
+                        return;
+                    }
+                    if (me.button == 0 || me.button == 2) {
+                        FileExplorerWindow.beginFileDrag(this, entry, currentKey, me.button == 2);
                     }
                 }
             });
@@ -2587,7 +2591,7 @@ public final class FileExplorerController {
 
     // ---------- 工具方法 ----------
 
-    private static String iconFor(VirtualFileSystem.Entry entry, int size) {
+    static String iconFor(VirtualFileSystem.Entry entry, int size) {
         if ("本地磁盘".equals(entry.type)) {
             return driveIcon(size);
         }
@@ -2614,11 +2618,11 @@ public final class FileExplorerController {
         return "<svg viewBox=\"0 0 24 24\"><polyline points=\"6,9 12,15 18,9\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"/></svg>";
     }
 
-    private static String px(double value) {
+    static String px(double value) {
         return Math.round(value) + "px";
     }
 
-    private static String escape(String value) {
+    static String escape(String value) {
         if (value == null) {
             return "";
         }
