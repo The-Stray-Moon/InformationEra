@@ -102,6 +102,7 @@ public final class FileExplorerController {
     private boolean showExtensions = true;
     private String searchQuery = "";
     private int lastClickedIndex = -1;
+    private int selectionAnchor = -1;
 
     private final List<ClipItem> clipboard = new ArrayList<>();
     private boolean clipboardCut = false;
@@ -272,6 +273,7 @@ public final class FileExplorerController {
         bindToolButton("fe-back", this::navigateBack);
         bindToolButton("fe-forward", this::navigateForward);
         bindToolButton("fe-up", this::navigateUp);
+        bindAddressInput();
 
         bindToolButton("fe-cmd-cut", this::cut);
         bindToolButton("fe-cmd-copy", this::copy);
@@ -352,6 +354,9 @@ public final class FileExplorerController {
                 }
             });
             content.addEventListener("contextmenu", e -> {
+                if (FileExplorerWindow.consumeContextMenuSuppression()) {
+                    return;
+                }
                 if (!(e instanceof MouseEvent me)) {
                     return;
                 }
@@ -435,6 +440,10 @@ public final class FileExplorerController {
             if (!(e instanceof MouseEvent me)) {
                 return;
             }
+            // 右键拖拽收尾同步处理，避免 contextmenu 与 tick 轮询竞争。
+            Position screen = document.documentToScreenPosition(new Position(me.clientX, me.clientY));
+            FileExplorerWindow.dragMouseUp(screen.x, screen.y);
+
             if (tabDragActive && tabDragIndex >= 0) {
                 int target = tabIndexAt(me.clientX);
                 if (target >= 0 && target != tabDragIndex) {
@@ -534,6 +543,18 @@ public final class FileExplorerController {
                 navigateForward();
             } else if (alt && ("ArrowUp".equalsIgnoreCase(key) || "Up".equalsIgnoreCase(key))) {
                 navigateUp();
+            } else if ("ArrowDown".equalsIgnoreCase(key) || "Down".equalsIgnoreCase(key)) {
+                moveSelection(1, shift);
+            } else if ("ArrowUp".equalsIgnoreCase(key) || "Up".equalsIgnoreCase(key)) {
+                moveSelection(-1, shift);
+            } else if ("ArrowLeft".equalsIgnoreCase(key) || "Left".equalsIgnoreCase(key)) {
+                moveSelection(-1, shift);
+            } else if ("ArrowRight".equalsIgnoreCase(key) || "Right".equalsIgnoreCase(key)) {
+                moveSelection(1, shift);
+            } else if ("Home".equalsIgnoreCase(key)) {
+                moveSelectionTo(0, shift);
+            } else if ("End".equalsIgnoreCase(key)) {
+                moveSelectionTo(renderedEntryList.size() - 1, shift);
             } else if ("Delete".equals(key)) {
                 delete();
             } else if ("Enter".equals(key)) {
@@ -551,6 +572,137 @@ public final class FileExplorerController {
         if (search != null) {
             search.focus();
         }
+    }
+
+    // ---------- 地址栏编辑 ----------
+
+    private void bindAddressInput() {
+        Element addressbar = document.getElementById("fe-addressbar");
+        Element input = document.getElementById("fe-address-input");
+        Element breadcrumb = document.getElementById("fe-breadcrumb");
+        if (addressbar == null || input == null) {
+            return;
+        }
+        // 点击面包屑空白处进入编辑。
+        if (breadcrumb != null) {
+            breadcrumb.addEventListener("mousedown", e -> {
+                if (!(e instanceof MouseEvent me) || me.button != 0) {
+                    return;
+                }
+                Element target = e.target instanceof Element ? (Element) e.target : null;
+                if (target != null && target.closest(".fe-crumb") != null) {
+                    return;
+                }
+                beginAddressEdit();
+            });
+        }
+        input.addEventListener("keydown", e -> {
+            e.stopPropagation();
+            if (e instanceof KeyEvent ke && "Enter".equals(ke.key)) {
+                commitAddressEdit();
+            } else if (e instanceof KeyEvent ke && "Escape".equals(ke.key)) {
+                cancelAddressEdit();
+            }
+        });
+        input.addEventListener("blur", e -> commitAddressEdit());
+    }
+
+    private void beginAddressEdit() {
+        Element addressbar = document.getElementById("fe-addressbar");
+        Element input = document.getElementById("fe-address-input");
+        if (addressbar == null || input == null) {
+            return;
+        }
+        input.setValue(pathText(currentKey));
+        addressbar.getClassList().add("editing");
+        input.focus();
+    }
+
+    private void commitAddressEdit() {
+        Element addressbar = document.getElementById("fe-addressbar");
+        Element input = document.getElementById("fe-address-input");
+        if (addressbar == null || input == null) {
+            return;
+        }
+        if (!addressbar.getClassList().contains("editing")) {
+            return;
+        }
+        addressbar.getClassList().remove("editing");
+        String raw = input.getValue();
+        if (raw == null || raw.trim().isEmpty()) {
+            return;
+        }
+        navigateByPath(raw.trim());
+    }
+
+    private void cancelAddressEdit() {
+        Element addressbar = document.getElementById("fe-addressbar");
+        if (addressbar != null) {
+            addressbar.getClassList().remove("editing");
+        }
+    }
+
+    /** 输入 key 或完整路径（用 > / \ 分隔）解析并导航。 */
+    private void navigateByPath(String raw) {
+        String key = fs.resolve(raw);
+        if (key == null) {
+            key = resolvePath(raw);
+        }
+        if (key == null) {
+            setStatus("路径不存在：" + raw);
+            return;
+        }
+        if (key.equals(currentKey)) {
+            return;
+        }
+        navigateTo(key);
+    }
+
+    private String resolvePath(String raw) {
+        String[] parts = raw.replace('\\', '/').split("/");
+        List<String> names = new ArrayList<>();
+        for (String part : parts) {
+            String t = part.trim();
+            if (!t.isEmpty() && !".".equals(t)) {
+                names.add(t);
+            }
+        }
+        if (names.isEmpty()) {
+            return null;
+        }
+        String key = null;
+        if (names.get(0).equalsIgnoreCase("此电脑") || names.get(0).equalsIgnoreCase("我的电脑")) {
+            key = "thispc";
+        } else if (names.get(0).equalsIgnoreCase("主文件夹")) {
+            key = "home";
+        } else {
+            // 相对当前目录的简单名。
+            String first = fs.resolve(names.get(0));
+            if (first != null) {
+                key = first;
+            }
+        }
+        if (key == null) {
+            // 以当前目录为基准解析第一个名字。
+            key = findChild(currentKey, names.get(0));
+        }
+        for (int i = 1; key != null && i < names.size(); i++) {
+            key = findChild(key, names.get(i));
+        }
+        return key;
+    }
+
+    private String findChild(String parentKey, String name) {
+        VirtualFileSystem.Folder parent = fs.folder(parentKey);
+        if (parent == null) {
+            return null;
+        }
+        for (VirtualFileSystem.Entry entry : parent.entries) {
+            if (entry.folder && entry.childKey != null && entry.name.equalsIgnoreCase(name)) {
+                return entry.childKey;
+            }
+        }
+        return null;
     }
 
     // ---------- 多标签页 ----------
@@ -1108,13 +1260,56 @@ public final class FileExplorerController {
             return;
         }
         List<CtxEntry> entries = new ArrayList<>();
-        entries.add(CtxEntry.header(rightDragEntry.name));
         entries.add(CtxEntry.action("移动到此处", () -> performRightDrop(false, sourceController)));
         entries.add(CtxEntry.action("复制到此处", () -> performRightDrop(true, sourceController)));
+        entries.add(CtxEntry.separator());
+        entries.add(CtxEntry.submenu("移动到文件夹", folderChoices(false, sourceController)));
+        entries.add(CtxEntry.submenu("复制到文件夹", folderChoices(true, sourceController)));
         entries.add(CtxEntry.separator());
         entries.add(CtxEntry.action("取消", () -> {
         }));
         openContextMenu(x, y, entries);
+    }
+
+    /** 递归列出所有可选文件夹（排除源条目自身及其子目录），作为二级菜单项。 */
+    private List<CtxEntry> folderChoices(boolean copy, FileExplorerController sourceController) {
+        List<CtxEntry> result = new ArrayList<>();
+        collectFolderChoices(result, "thispc", copy, sourceController, 0);
+        collectFolderChoices(result, "home", copy, sourceController, 0);
+        if (result.isEmpty()) {
+            result.add(CtxEntry.action("无可选文件夹", () -> {
+            }));
+        }
+        return result;
+    }
+
+    private void collectFolderChoices(List<CtxEntry> out, String key, boolean copy,
+                                      FileExplorerController sourceController, int depth) {
+        VirtualFileSystem.Folder folder = fs.folder(key);
+        if (folder == null) {
+            return;
+        }
+        if (depth > 0) {
+            String label = (depth > 1 ? "— ".repeat(depth - 1) : "") + folder.name;
+            out.add(CtxEntry.action(label, () -> {
+                sourceController.moveOrCopy(rightDragSourceKey, rightDragEntry, key, copy);
+                if (sourceController != this) {
+                    refreshAfterExternal();
+                }
+            }));
+        }
+        for (VirtualFileSystem.Entry entry : folder.entries) {
+            if (entry.folder && entry.childKey != null) {
+                // 跳过拖拽源文件夹及其子树，避免移动到自身内部。
+                if (rightDragEntry != null && rightDragEntry.folder
+                        && rightDragEntry.childKey != null && entry.childKey.startsWith(rightDragEntry.childKey)) {
+                    continue;
+                }
+                if (depth < 4) {
+                    collectFolderChoices(out, entry.childKey, copy, sourceController, depth + 1);
+                }
+            }
+        }
     }
 
     private void performRightDrop(boolean copy, FileExplorerController sourceController) {
@@ -1195,7 +1390,6 @@ public final class FileExplorerController {
             updateStatusBar();
         }
         List<CtxEntry> entries = new ArrayList<>();
-        entries.add(CtxEntry.header(entry.name));
         entries.add(CtxEntry.action("打开", () -> openEntry(entry)));
         entries.add(CtxEntry.submenu("打开方式", List.of(
                 CtxEntry.action("记事本", () -> setStatus("已用记事本打开：" + entry.name)),
@@ -1561,6 +1755,62 @@ public final class FileExplorerController {
 
     private int indexOfEntry(VirtualFileSystem.Entry entry) {
         return renderedEntryList.indexOf(entry);
+    }
+
+    private void moveSelection(int delta, boolean extend) {
+        if (renderedEntryList.isEmpty()) {
+            return;
+        }
+        if (extend) {
+            if (selectionAnchor < 0) {
+                selectionAnchor = lastClickedIndex >= 0 ? lastClickedIndex : 0;
+            }
+            int next = Math.max(0, Math.min(renderedEntryList.size() - 1,
+                    (lastClickedIndex >= 0 ? lastClickedIndex : selectionAnchor) + delta));
+            selectRange(selectionAnchor, next);
+            lastClickedIndex = next;
+        } else {
+            selectionAnchor = -1;
+            int base = lastClickedIndex >= 0 ? lastClickedIndex : 0;
+            int next = Math.max(0, Math.min(renderedEntryList.size() - 1, base + delta));
+            selected.clear();
+            selected.add(renderedEntryList.get(next));
+            lastClickedIndex = next;
+            updateSelectionVisuals();
+            updateStatusBar();
+        }
+    }
+
+    private void moveSelectionTo(int index, boolean extend) {
+        if (renderedEntryList.isEmpty()) {
+            return;
+        }
+        int target = Math.max(0, Math.min(renderedEntryList.size() - 1, index));
+        if (extend) {
+            if (selectionAnchor < 0) {
+                selectionAnchor = lastClickedIndex >= 0 ? lastClickedIndex : 0;
+            }
+            selectRange(selectionAnchor, target);
+            lastClickedIndex = target;
+        } else {
+            selectionAnchor = -1;
+            selected.clear();
+            selected.add(renderedEntryList.get(target));
+            lastClickedIndex = target;
+            updateSelectionVisuals();
+            updateStatusBar();
+        }
+    }
+
+    private void selectRange(int a, int b) {
+        int lo = Math.min(a, b);
+        int hi = Math.max(a, b);
+        selected.clear();
+        for (int i = lo; i <= hi; i++) {
+            selected.add(renderedEntryList.get(i));
+        }
+        updateSelectionVisuals();
+        updateStatusBar();
     }
 
     private Element findItemByIndex(int index) {
@@ -2296,7 +2546,7 @@ public final class FileExplorerController {
         for (Element item : document.querySelectorAll(".fe-item")) {
             item.addEventListener("click", e -> handleItemClick(item, e));
             item.addEventListener("contextmenu", e -> {
-                if (FileExplorerWindow.isRightDragActive()) {
+                if (FileExplorerWindow.consumeContextMenuSuppression()) {
                     return;
                 }
                 e.stopPropagation();
@@ -2310,8 +2560,14 @@ public final class FileExplorerController {
                     if (entry == null) {
                         return;
                     }
-                    if (me.button == 0 || me.button == 2) {
-                        FileExplorerWindow.beginFileDrag(this, entry, currentKey, me.button == 2);
+                    // AUI 的 MouseEvent.button 使用 GLFW 按钮号：0=左键，1=右键，2=中键。
+                    if (me.button == 0 || me.button == 1) {
+                        // 被拖动的文件进入单独选中状态（无论左右键）。
+                        selected.clear();
+                        selected.add(entry);
+                        updateSelectionVisuals();
+                        updateStatusBar();
+                        FileExplorerWindow.beginFileDrag(this, entry, currentKey, me.button == 1);
                     }
                 }
             });

@@ -33,6 +33,7 @@ public final class FileExplorerWindow {
     private static double dragStartX;
     private static double dragStartY;
     private static boolean dragActive;
+    private static boolean suppressNextContextMenu;
 
     private FileExplorerWindow() {
     }
@@ -81,6 +82,13 @@ public final class FileExplorerWindow {
         return dragSource != null && dragRight && dragActive;
     }
 
+    /** 右键拖拽释放后短暂抑制一次 contextmenu，避免普通右键菜单覆盖 drop 菜单。 */
+    public static boolean consumeContextMenuSuppression() {
+        boolean value = suppressNextContextMenu;
+        suppressNextContextMenu = false;
+        return value;
+    }
+
     /** 源窗口在文件项按下左/右键时调用一次，登记一次潜在拖拽。 */
     public static void beginFileDrag(FileExplorerController source, VirtualFileSystem.Entry entry,
                                      String sourceKey, boolean right) {
@@ -107,16 +115,7 @@ public final class FileExplorerWindow {
             return;
         }
 
-        boolean released = dragRight
-                ? (Operation.getMouseButtons() & 2) == 0
-                : (Operation.getMouseButtons() & 1) == 0;
-
         if (!dragActive) {
-            // 按下后未移动就松开：只是普通点击，取消拖拽。
-            if (released) {
-                cancelDrag();
-                return;
-            }
             double dx = mouse.x - dragStartX;
             double dy = mouse.y - dragStartY;
             if (dx * dx + dy * dy <= 25) {
@@ -132,18 +131,43 @@ public final class FileExplorerWindow {
 
         moveGlobalGhost();
 
-        if (released) {
-            finishDrag(mouse.x, mouse.y);
+        // 右键拖拽的释放由 document mouseup 同步处理，避免 contextmenu 与 tick 竞争；
+        // 左键跨窗口拖拽仍由这里轮询释放。
+        if (!dragRight) {
+            boolean released = (Operation.getMouseButtons() & 1) == 0;
+            if (released) {
+                finishDrag(mouse.x, mouse.y);
+            }
         }
+    }
+
+    /** 由源窗口的 document mouseup 同步调用，解决右键 contextmenu 与 tick 轮询的时序竞争。 */
+    public static void dragMouseUp(double screenX, double screenY) {
+        if (dragSource == null) {
+            return;
+        }
+        if (!dragRight) {
+            // 左键跨窗口可能鼠标已经在其它窗口释放，这里仅作兜底；真正收尾交给 tick。
+            return;
+        }
+        if (!dragActive) {
+            // 未越过拖拽阈值，只是普通点击，交给 click/contextmenu。
+            cancelDrag();
+            return;
+        }
+        finishDrag(screenX, screenY);
     }
 
     private static void finishDrag(double screenX, double screenY) {
         DropTarget target = resolveDropTarget(screenX, screenY);
         if (dragRight) {
             if (target != null) {
+                // 只有成功打开 drop 菜单才抑制紧随的 contextmenu。
                 target.controller.showExternalDropMenu(dragEntry, dragSourceKey, target.key,
                         new Position(screenX, screenY), dragSource);
+                suppressNextContextMenu = true;
             }
+            // target == null：不抑制，让 contextmenu 正常弹普通右键菜单。
         } else if (target != null) {
             boolean copy = Operation.isKeyPressed("key.keyboard.left.control")
                     || Operation.isKeyPressed("key.keyboard.right.control");
