@@ -513,6 +513,10 @@ public final class FileExplorerController {
             boolean ctrl = ke.controlKey;
             boolean alt = ke.altKey;
             boolean shift = ke.shiftKey;
+            // 焦点在文本输入框时，只让输入框自己处理按键，不触发导航/删除/选择。
+            if (isTextInputFocused()) {
+                return;
+            }
             if (ctrl && shift && "n".equalsIgnoreCase(key)) {
                 createFolder();
             } else if (ctrl && "t".equalsIgnoreCase(key)) {
@@ -555,16 +559,26 @@ public final class FileExplorerController {
                 moveSelectionTo(0, shift);
             } else if ("End".equalsIgnoreCase(key)) {
                 moveSelectionTo(renderedEntryList.size() - 1, shift);
-            } else if ("Delete".equals(key)) {
+            } else if ("Delete".equals(key) && !shift && !ctrl && !alt) {
                 delete();
-            } else if ("Enter".equals(key)) {
+            } else if ("Enter".equals(key) && !shift && !ctrl && !alt) {
                 openPrimary();
-            } else if ("Backspace".equals(key)) {
+            } else if ("Backspace".equals(key) && !shift && !ctrl && !alt) {
                 navigateUp();
-            } else if ("F2".equals(key)) {
+            } else if ("F2".equals(key) && !shift && !ctrl && !alt) {
                 renamePrimary();
             }
         });
+    }
+
+    private boolean isTextInputFocused() {
+        Element active = document.getActiveElement();
+        if (active == null) {
+            return false;
+        }
+        return active == document.getElementById("fe-search")
+                || active == document.getElementById("fe-rename-input")
+                || active == document.getElementById("fe-address-input");
     }
 
     private void focusSearch() {
@@ -1770,9 +1784,9 @@ public final class FileExplorerController {
             selectRange(selectionAnchor, next);
             lastClickedIndex = next;
         } else {
-            selectionAnchor = -1;
             int base = lastClickedIndex >= 0 ? lastClickedIndex : 0;
             int next = Math.max(0, Math.min(renderedEntryList.size() - 1, base + delta));
+            selectionAnchor = next;
             selected.clear();
             selected.add(renderedEntryList.get(next));
             lastClickedIndex = next;
@@ -1793,7 +1807,7 @@ public final class FileExplorerController {
             selectRange(selectionAnchor, target);
             lastClickedIndex = target;
         } else {
-            selectionAnchor = -1;
+            selectionAnchor = target;
             selected.clear();
             selected.add(renderedEntryList.get(target));
             lastClickedIndex = target;
@@ -2556,6 +2570,10 @@ public final class FileExplorerController {
             });
             item.addEventListener("mousedown", e -> {
                 if (e instanceof MouseEvent me) {
+                    // Shift / Ctrl 点击是选择操作，不进入拖拽，也不改变选中。
+                    if (me.shiftKey || me.controlKey) {
+                        return;
+                    }
                     VirtualFileSystem.Entry entry = entryFor(item);
                     if (entry == null) {
                         return;
@@ -2611,20 +2629,23 @@ public final class FileExplorerController {
         int index = indexOf(item);
         boolean ctrl = event instanceof MouseEvent me && me.controlKey;
         boolean shift = event instanceof MouseEvent me && me.shiftKey;
-        if (shift && lastClickedIndex >= 0) {
+        if (shift && selectionAnchor >= 0) {
             selected.clear();
-            int lo = Math.min(lastClickedIndex, index);
-            int hi = Math.max(lastClickedIndex, index);
+            int lo = Math.min(selectionAnchor, index);
+            int hi = Math.max(selectionAnchor, index);
             for (int i = lo; i <= hi; i++) {
                 selected.add(renderedEntryList.get(i));
             }
+            // 保持锚点不变，只有最后点击位置移动。
         } else if (ctrl) {
             if (!selected.remove(entry)) {
                 selected.add(entry);
             }
+            selectionAnchor = index;
         } else {
             selected.clear();
             selected.add(entry);
+            selectionAnchor = index;
         }
         lastClickedIndex = index;
 

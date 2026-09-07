@@ -116,6 +116,11 @@ public final class FileExplorerWindow {
         }
 
         if (!dragActive) {
+            // 左键未激活且已释放：只是普通点击，取消潜在拖拽。
+            if (!dragRight && (Operation.getMouseButtons() & 1) == 0) {
+                cancelDrag();
+                return;
+            }
             double dx = mouse.x - dragStartX;
             double dy = mouse.y - dragStartY;
             if (dx * dx + dy * dy <= 25) {
