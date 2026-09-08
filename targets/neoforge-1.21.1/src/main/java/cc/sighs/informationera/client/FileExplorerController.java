@@ -168,6 +168,34 @@ public final class FileExplorerController {
         return document;
     }
 
+    boolean isMinimized() {
+        return minimized;
+    }
+
+    String currentKey() {
+        return currentKey;
+    }
+
+    String currentFolderName() {
+        VirtualFileSystem.Folder folder = fs.folder(currentKey);
+        return folder != null ? folder.name : "文件资源管理器";
+    }
+
+    /** 供任务栏逻辑调用：最小化/恢复，返回操作后的最小化状态。 */
+    boolean toggleMinimizeForTaskbar() {
+        toggleMinimize();
+        return minimized;
+    }
+
+    /** 供任务栏/最近路径跳转使用，直接导航到 key。 */
+    void navigateToExternal(String key) {
+        if (fs.folder(key) == null) {
+            return;
+        }
+        currentKey = key;
+        afterNavigate();
+    }
+
     public void closeWindow() {
         closeContextMenu();
         FileExplorerWindow.unregister(this);
@@ -237,6 +265,13 @@ public final class FileExplorerController {
     // ---------- 静态元素与事件绑定 ----------
 
     private void bindStatic() {
+        // 点击窗口任意位置即聚焦到最顶层。
+        if (window != null) {
+            window.addEventListener("mousedown", e -> {
+                FileExplorerWindow.focus(FileExplorerController.this);
+            });
+        }
+
         Element titlebar = document.getElementById("fe-titlebar");
         if (titlebar != null) {
             titlebar.addEventListener("mousedown", e -> {
@@ -1194,11 +1229,12 @@ public final class FileExplorerController {
             restoreW = windowWidth;
             restoreH = windowHeight;
             minimized = true;
-            window.getClassList().add("fe-minimized");
-            windowHeight = TITLEBAR_HEIGHT;
+            // 最小化：整个窗口隐藏，只保留任务栏任务标。
+            window.setInlineStyleProperty("display", "none");
         } else {
             minimized = false;
-            window.getClassList().remove("fe-minimized");
+            // 移除内联 display，恢复 CSS 定义的布局，避免残留 display 导致尺寸错乱。
+            window.removeInlineStyleProperty("display");
             windowWidth = restoreW;
             windowHeight = restoreH;
         }
@@ -2241,12 +2277,14 @@ public final class FileExplorerController {
         if (search != null) {
             search.setValue("");
         }
-        // 记录导航历史（去重，最近在前）。
+        // 记录本窗口导航历史（去重，最近在前）。
         navHistory.remove(currentKey);
         navHistory.add(0, currentKey);
         if (navHistory.size() > 20) {
             navHistory.remove(navHistory.size() - 1);
         }
+        // 记录全局最近路径（任务栏 Jump List 用）。
+        FileExplorerWindow.recordRecentPath(currentKey);
         updateSearchPlaceholder();
         renderContent();
         renderNavigationState();

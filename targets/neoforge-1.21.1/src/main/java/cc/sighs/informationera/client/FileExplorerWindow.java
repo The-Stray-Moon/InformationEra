@@ -23,7 +23,10 @@ public final class FileExplorerWindow {
     private static final String TEMPLATE = "screens/file-explorer.html";
 
     private static final List<FileExplorerController> windows = new ArrayList<>();
+    private static final List<String> recentPaths = new ArrayList<>();
     private static VirtualFileSystem fs;
+    private static int zCounter = 10;
+    private static FileExplorerController focusedController;
 
     /** 跨窗口拖拽的全局状态（坐标均使用 AUI 屏幕坐标）。 */
     private static FileExplorerController dragSource;
@@ -53,6 +56,168 @@ public final class FileExplorerWindow {
         controller.mount(document);
         windows.add(controller);
         FileExplorerController.setActive(controller);
+        focus(controller);
+    }
+
+    /** 打开新窗口并定位到指定路径。 */
+    public static void openAt(String pathKey) {
+        open();
+        if (!windows.isEmpty()) {
+            FileExplorerController controller = windows.get(windows.size() - 1);
+            controller.navigateToExternal(pathKey);
+        }
+    }
+
+    /** 聚焦窗口：置前（提高 body translateZ）并设为活跃，不改变窗口列表顺序。 */
+    public static void focus(FileExplorerController controller) {
+        if (controller == null || !windows.contains(controller)) {
+            return;
+        }
+        setZ(controller, ++zCounter);
+        focusedController = controller;
+        FileExplorerController.setActive(controller);
+    }
+
+    private static void setZ(FileExplorerController controller, int z) {
+        Document document = controller.document();
+        if (document == null || document.body == null) {
+            return;
+        }
+        document.body.setInlineStyleProperty("transform", "translateZ(" + z + "px)");
+    }
+
+    /** 当前聚焦的窗口，无窗口返回 null。 */
+    public static FileExplorerController focused() {
+        if (focusedController != null && windows.contains(focusedController)) {
+            return focusedController;
+        }
+        return windows.isEmpty() ? null : windows.get(windows.size() - 1);
+    }
+
+    /** 记录最近访问路径（去重，最近在前）。 */
+    public static void recordRecentPath(String key) {
+        if (key == null) {
+            return;
+        }
+        recentPaths.remove(key);
+        recentPaths.add(0, key);
+        if (recentPaths.size() > 15) {
+            recentPaths.remove(recentPaths.size() - 1);
+        }
+    }
+
+    public static List<String> getRecentPaths() {
+        return recentPaths;
+    }
+
+    /** 任务标右键的 Jump List：打开新窗口 / 最近路径。 */
+    public static void showJumpList(Document triggerDoc, double x, double y) {
+        Element menu = triggerDoc.getElementById("fe-jump-list");
+        if (menu == null) {
+            return;
+        }
+        StringBuilder sb = new StringBuilder();
+        sb.append("<div class=\"fe-jump-item\" data-action=\"new\">打开新窗口</div>");
+        sb.append("<div class=\"fe-jump-sep\"></div>");
+        if (recentPaths.isEmpty()) {
+            sb.append("<div class=\"fe-jump-item fe-jump-disabled\">暂无最近路径</div>");
+        } else {
+            for (String key : recentPaths) {
+                VirtualFileSystem.Folder folder = fs != null ? fs.folder(key) : null;
+                String label = folder != null ? folder.name : key;
+                sb.append("<div class=\"fe-jump-item\" data-path=\"").append(FileExplorerController.escape(key))
+                  .append("\">").append(FileExplorerController.escape(label)).append("</div>");
+            }
+        }
+        menu.setInnerHTML(sb.toString());
+        // 菜单向上浮（固定显示在按钮上方），不跟随鼠标向下展开。
+        menu.setInlineStyleProperty("left", "8px");
+        menu.setInlineStyleProperty("bottom", "40px");
+        menu.removeInlineStyleProperty("top");
+        menu.setInlineStyleProperty("display", "block");
+        // 打开菜单期间让 body 接收全屏点击，用于点空白关闭。
+        if (triggerDoc.body != null) {
+            triggerDoc.body.setInlineStyleProperty("pointer-events", "auto");
+        }
+
+        for (Element item : menu.querySelectorAll(".fe-jump-item")) {
+            String path = item.getAttribute("data-path");
+            String action = item.getAttribute("data-action");
+            item.addEventListener("click", e -> {
+                e.stopPropagation();
+                // 完整关闭：隐藏菜单、隐藏拦截层、恢复 body 穿透。
+                FileExplorerWindow.hideJumpList(triggerDoc);
+                FileExplorerTrigger.hidePreview();
+                if ("new".equals(action)) {
+                    open();
+                } else if (path != null) {
+                    openAt(path);
+                }
+            });
+        }
+    }
+
+    /** 关闭任务栏 Jump List。 */
+    public static void hideJumpList(Document triggerDoc) {
+        Element menu = triggerDoc.getElementById("fe-jump-list");
+        if (menu != null) {
+            menu.setInlineStyleProperty("display", "none");
+        }
+        // 恢复 body 的穿透，避免影响其它点击。
+        if (triggerDoc.body != null) {
+            triggerDoc.body.removeInlineStyleProperty("pointer-events");
+        }
+    }
+
+    /** 渲染任务栏缩略图预览到 trigger document 的预览容器。 */
+    public static void renderTaskbarPreview(Element container, Document triggerDoc) {
+        if (container == null) {
+            return;
+        }
+        StringBuilder sb = new StringBuilder();
+        if (windows.isEmpty()) {
+            container.setInnerHTML("");
+            return;
+        }
+        sb.append("<div class=\"fe-taskbar-preview-list\">");
+        // 最近使用在前。
+        for (int i = windows.size() - 1; i >= 0; i--) {
+            FileExplorerController controller = windows.get(i);
+            sb.append("<div class=\"fe-taskbar-preview-item\" data-window=\"").append(i).append("\">");
+            sb.append("<div class=\"fe-taskbar-preview-title\">")
+              .append(FileExplorerController.escape(controller.currentFolderName())).append("</div>");
+            sb.append("<div class=\"fe-taskbar-preview-path\">")
+              .append(FileExplorerController.escape(controller.currentKey())).append("</div>");
+            sb.append("<span class=\"fe-taskbar-preview-close\">×</span>");
+            sb.append("</div>");
+        }
+        sb.append("</div>");
+        container.setInnerHTML(sb.toString());
+
+        for (Element item : container.querySelectorAll(".fe-taskbar-preview-item")) {
+            String idxStr = item.getAttribute("data-window");
+            int idx = idxStr == null ? -1 : Integer.parseInt(idxStr);
+            Element close = item.querySelector(".fe-taskbar-preview-close");
+            if (close != null) {
+                close.addEventListener("click", e -> {
+                    e.stopPropagation();
+                    if (idx >= 0 && idx < windows.size()) {
+                        windows.get(idx).closeWindow();
+                    }
+                    renderTaskbarPreview(container, triggerDoc);
+                });
+            }
+            item.addEventListener("click", e -> {
+                if (idx >= 0 && idx < windows.size()) {
+                    FileExplorerController controller = windows.get(idx);
+                    if (controller.isMinimized()) {
+                        controller.toggleMinimizeForTaskbar();
+                    }
+                    focus(controller);
+                    FileExplorerTrigger.hidePreview();
+                }
+            });
+        }
     }
 
     public static void unregister(FileExplorerController controller) {
@@ -61,7 +226,7 @@ public final class FileExplorerWindow {
             cancelDrag();
         }
         if (!windows.isEmpty()) {
-            FileExplorerController.setActive(windows.get(windows.size() - 1));
+            focus(windows.get(windows.size() - 1));
         }
     }
 

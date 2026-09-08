@@ -1248,7 +1248,7 @@
 
 .fe-trigger-btn {
     position: fixed;
-    top: 8px;
+    bottom: 8px;
     left: 8px;
     z-index: 40;
     pointer-events: auto;
@@ -1258,4 +1258,135 @@
 .fe-trigger-btn svg {
     width: 22px;
     height: 22px;
+}
+
+.fe-taskbar-badge {
+    position: absolute;
+    top: -6px;
+    right: -6px;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    border-radius: 8px;
+    color: #ffffff;
+    background: var(--ore-red);
+    font-size: 11px;
+    line-height: 16px;
+    text-align: center;
+    display: none;
+}
+
+/* 预览固定时的全屏透明拦截层：点击空白关闭预览。 */
+.fe-taskbar-capture {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    z-index: 55;
+    display: none;
+    pointer-events: auto;
+    background: rgba(0, 0, 0, 0.01);
+}
+
+/* 任务栏缩略图预览 */
+.fe-taskbar-preview {
+    position: fixed;
+    left: 8px;
+    bottom: 56px;
+    z-index: 60;
+    display: none;
+    pointer-events: auto;
+}
+
+.fe-taskbar-preview-list {
+    display: flex;
+    gap: 8px;
+    padding: 8px;
+    background: var(--ore-surface-deep);
+    border: 2px solid var(--ore-edge);
+    box-shadow: 4px 4px 0 rgba(0, 0, 0, 0.35);
+}
+
+.fe-taskbar-preview-item {
+    position: relative;
+    width: 180px;
+    min-height: 64px;
+    padding: 8px 20px 8px 8px;
+    border: 1px solid transparent;
+    color: var(--ore-ink);
+    cursor: pointer;
+}
+
+.fe-taskbar-preview-item:hover {
+    border-color: var(--ore-edge-light);
+    background: var(--ore-surface);
+}
+
+.fe-taskbar-preview-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: #ffffff;
+}
+
+.fe-taskbar-preview-path {
+    font-size: var(--ore-font-sm);
+    color: var(--ore-ink-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.fe-taskbar-preview-close {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    width: 14px;
+    height: 14px;
+    color: var(--ore-ink-muted);
+    cursor: pointer;
+    text-align: center;
+    line-height: 14px;
+}
+
+.fe-taskbar-preview-close:hover {
+    color: #ffffff;
+    background: var(--ore-red);
+}
+
+/* Jump List */
+.fe-jump-list {
+    position: fixed;
+    z-index: 60;
+    display: none;
+    min-width: 180px;
+    padding: 4px;
+    pointer-events: auto;
+    background: var(--ore-surface-deep);
+    border: 2px solid var(--ore-edge);
+    box-shadow: 4px 4px 0 rgba(0, 0, 0, 0.35);
+}
+
+.fe-jump-item {
+    padding: 6px 12px;
+    color: var(--ore-ink);
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.fe-jump-item:hover {
+    color: #ffffff;
+    background: var(--ore-green);
+}
+
+.fe-jump-disabled {
+    color: var(--ore-ink-muted);
+    cursor: default;
+}
+
+.fe-jump-sep {
+    height: 0;
+    margin: 4px 8px;
+    border-top: 2px solid var(--ore-edge);
 }
