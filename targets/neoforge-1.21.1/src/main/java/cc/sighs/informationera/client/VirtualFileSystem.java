@@ -189,6 +189,20 @@ public final class VirtualFileSystem {
         };
     }
 
+    /** 新建快捷方式。targetKey 为快捷方式的目标 key（文件夹则为进入 key，文件则为 null 表示无法打开）。 */
+    public Runnable createShortcut(String parentKey, Entry target, String targetKey) {
+        Folder parent = folders.get(parentKey);
+        if (parent == null) {
+            return () -> {
+            };
+        }
+        String base = target.name + " - 快捷方式.lnk";
+        String name = uniqueName(parentKey, base);
+        Entry shortcut = new Entry(name, false, 1024L, "刚刚", "快捷方式", targetKey);
+        parent.entries.add(shortcut);
+        return () -> parent.entries.remove(shortcut);
+    }
+
     /** 删除条目（文件夹会连同子树一并移除）。返回撤销动作。 */
     public Runnable delete(String folderKey, Entry entry) {
         Folder parent = folders.get(folderKey);

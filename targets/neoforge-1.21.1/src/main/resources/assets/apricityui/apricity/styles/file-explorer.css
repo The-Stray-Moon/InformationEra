@@ -278,6 +278,13 @@
     color: var(--ore-edge-light);
 }
 
+.fe-history-btn {
+    flex: 0 0 28px;
+    width: 28px;
+    height: 28px;
+    padding: 2px;
+}
+
 .fe-searchbar {
     position: relative;
     flex: 0 1 240px;
@@ -423,6 +430,33 @@
 
 .fe-pane-resizer:hover {
     background: var(--ore-edge-light);
+}
+
+.fe-preview-toolbar {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 10px;
+}
+
+.fe-preview-size {
+    min-height: 24px;
+    padding: 2px 8px;
+    border: 2px solid transparent;
+    color: var(--ore-ink-muted);
+    background: transparent;
+    cursor: pointer;
+    font-size: var(--ore-font-sm);
+}
+
+.fe-preview-size:hover {
+    color: #ffffff;
+    background: var(--ore-surface);
+}
+
+.fe-preview-size.active {
+    color: #ffffff;
+    background: var(--ore-surface);
+    border-color: var(--ore-edge);
 }
 
 .fe-preview-icon {
@@ -571,16 +605,32 @@
 
 .ore-theme .table.fe-table tbody tr {
     cursor: pointer;
+    transition: background-color 120ms ease, color 120ms ease;
 }
 
 .ore-theme .table.fe-table tbody tr:hover {
     background: var(--ore-surface);
 }
 
+.fe-grid-item,
+.fe-list-item {
+    transition: background-color 120ms ease, border-color 120ms ease, opacity 120ms ease;
+}
+
 .ore-theme .table.fe-table tbody tr.selected,
 .ore-theme .table.fe-table tbody tr.selected:hover {
     color: #ffffff;
     background: var(--ore-blue);
+}
+
+/* 剪切的条目虚化。 */
+.fe-item.cut {
+    opacity: 0.45;
+}
+
+.fe-item.cut.selected,
+.fe-item.cut.selected:hover {
+    opacity: 0.55;
 }
 
 .ore-theme .table.fe-table th.sortable {
@@ -604,12 +654,53 @@
 }
 
 .ore-theme .table.fe-table .fe-group-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
     padding: 6px 12px;
     color: #ffffff;
     background: var(--ore-surface-deep);
     border-right: 0;
     border-bottom: 2px solid var(--ore-edge);
     font-size: var(--ore-font-sm);
+}
+
+.fe-group-toggle {
+    flex: 0 0 16px;
+    width: 16px;
+    height: 16px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+}
+
+.fe-group-title {
+    cursor: pointer;
+}
+
+.fe-group-title:hover {
+    color: var(--ore-gold);
+}
+
+/* 非表格视图的分组：每个分组是独立 section，组内条目各自重新排布。 */
+.fe-group-section {
+    display: block;
+    margin-bottom: 8px;
+}
+
+/* 非表格视图的分组头（div 形式），占据整行。 */
+.fe-group-div {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    padding: 6px 12px;
+    color: #ffffff;
+    background: var(--ore-surface-deep);
+    border-bottom: 2px solid var(--ore-edge);
+    font-size: var(--ore-font-sm);
+    cursor: default;
 }
 
 .fe-empty {
@@ -659,6 +750,12 @@
     padding: 12px;
 }
 
+/* 视图尺寸影响网格布局：列宽随图标大小变化，而不是单纯缩放图标。 */
+.fe-content.fe-view-small .fe-grid { grid-template-columns: repeat(auto-fill, minmax(72px, 1fr)); }
+.fe-content.fe-view-medium .fe-grid { grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); }
+.fe-content.fe-view-large .fe-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+.fe-content.fe-view-xlarge .fe-grid { grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
+
 .fe-grid-item {
     display: flex;
     flex-direction: column;
@@ -700,23 +797,80 @@
     white-space: nowrap;
 }
 
-/* ---------- 列表视图 ---------- */
-.fe-list {
+/* ---------- 平铺视图 ---------- */
+.fe-tiles {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 4px;
+    padding: 8px;
+}
+
+.fe-tile-item {
     display: flex;
-    flex-direction: column;
-    padding: 4px 0;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border: 1px solid transparent;
+    color: var(--ore-ink);
+    cursor: pointer;
+}
+
+.fe-tile-item:hover {
+    border-color: var(--ore-edge-light);
+    background: var(--ore-surface-deep);
+}
+
+.fe-tile-item.selected,
+.fe-tile-item.selected:hover {
+    border-color: var(--ore-blue);
+    background: var(--ore-surface);
+}
+
+.fe-tile-item .fe-icon {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.fe-tile-meta {
+    min-width: 0;
+}
+
+.fe-tile-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.fe-tile-line {
+    color: var(--ore-ink-muted);
+    font-size: var(--ore-font-sm);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* ---------- 列表视图（小图标 + 名称，多列自动换行） ---------- */
+.fe-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 2px;
+    padding: 8px;
 }
 
 .fe-list-item {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 6px 12px;
+    padding: 4px 8px;
     color: var(--ore-ink);
     cursor: pointer;
+    border: 1px solid transparent;
 }
 
 .fe-list-item:hover {
+    border-color: var(--ore-edge-light);
     background: var(--ore-surface);
 }
 
@@ -743,6 +897,60 @@
     white-space: nowrap;
 }
 
+/* ---------- 内容视图（单列，图标 + 名称 + 元数据行） ---------- */
+.fe-content-list {
+    display: flex;
+    flex-direction: column;
+    padding: 4px 0;
+}
+
+.fe-content-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    color: var(--ore-ink);
+    cursor: pointer;
+    border: 1px solid transparent;
+}
+
+.fe-content-item:hover {
+    border-color: var(--ore-edge-light);
+    background: var(--ore-surface);
+}
+
+.fe-content-item.selected,
+.fe-content-item.selected:hover {
+    color: #ffffff;
+    background: var(--ore-blue);
+}
+
+.fe-content-item .fe-icon {
+    flex: 0 0 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.fe-content-meta {
+    min-width: 0;
+}
+
+.fe-content-name {
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.fe-content-details {
+    color: var(--ore-ink-muted);
+    font-size: var(--ore-font-sm);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
 /* 紧凑视图 */
 .fe-content.fe-compact .table.fe-table th,
 .fe-content.fe-compact .table.fe-table td {
@@ -750,7 +958,11 @@
 }
 
 .fe-content.fe-compact .fe-list-item {
-    padding: 3px 12px;
+    padding: 3px 8px;
+}
+
+.fe-content.fe-compact .fe-content-item {
+    padding: 4px 12px;
 }
 
 /* ---------- 状态栏 ---------- */
@@ -877,7 +1089,8 @@
     text-overflow: ellipsis;
 }
 
-.fe-ctx-item:hover {
+.fe-ctx-item:hover,
+.fe-ctx-item.ctx-focused {
     color: #ffffff;
     background: var(--ore-green);
 }

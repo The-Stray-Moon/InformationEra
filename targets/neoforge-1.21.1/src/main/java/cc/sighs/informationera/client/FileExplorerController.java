@@ -96,13 +96,18 @@ public final class FileExplorerController {
     private boolean showNav = true;
     private boolean checkboxes = false;
     private boolean previewOpen = false;
+    private int previewSize = 64;
     private boolean compact = false;
     private boolean detailsPaneOpen = false;
     private String groupBy = null;
+    private final Set<String> collapsedGroups = new HashSet<>();
     private boolean showExtensions = true;
     private String searchQuery = "";
     private int lastClickedIndex = -1;
     private int selectionAnchor = -1;
+    private final List<String> navHistory = new ArrayList<>();
+    private VirtualFileSystem.Entry lastRenameCandidate = null;
+    private long lastRenameCandidateTime = 0L;
 
     private final List<ClipItem> clipboard = new ArrayList<>();
     private boolean clipboardCut = false;
@@ -124,6 +129,7 @@ public final class FileExplorerController {
     private double rubberWidth;
     private double rubberHeight;
     private boolean contextMenuOpen = false;
+    private int contextFocusIndex = -1;
     private int resizeColIndex = -1;
     private double colResizeStartX;
     private double colResizeStartWidth;
@@ -274,6 +280,7 @@ public final class FileExplorerController {
         bindToolButton("fe-forward", this::navigateForward);
         bindToolButton("fe-up", this::navigateUp);
         bindAddressInput();
+        bindHistory();
 
         bindToolButton("fe-cmd-cut", this::cut);
         bindToolButton("fe-cmd-copy", this::copy);
@@ -349,7 +356,9 @@ public final class FileExplorerController {
                     return;
                 }
                 Element target = e.target instanceof Element ? (Element) e.target : null;
-                if (target == null || (target.closest(".fe-item") == null && target.closest("th") == null)) {
+                if (target == null || (target.closest(".fe-item") == null
+                        && target.closest("th") == null
+                        && target.closest(".fe-group-row") == null)) {
                     beginRubber(me.clientX, me.clientY);
                 }
             });
@@ -361,13 +370,18 @@ public final class FileExplorerController {
                     return;
                 }
                 Element target = e.target instanceof Element ? (Element) e.target : null;
-                if (target == null || target.closest(".fe-item") == null) {
+                if (target == null || (target.closest(".fe-item") == null && target.closest(".fe-group-row") == null)) {
                     showContentContextMenu(me.clientX, me.clientY);
                 }
             });
             content.addEventListener("wheel", e -> {
                 if (e instanceof MouseEvent me) {
-                    handleContentWheel(me);
+                    if (me.controlKey) {
+                        // 阻止默认滚动 + 阻止向原生传递，只做布局切换。
+                        e.preventDefault();
+                        me.consumeNative();
+                        handleContentWheel(me);
+                    }
                 }
             });
         }
@@ -491,12 +505,17 @@ public final class FileExplorerController {
 
     /** 去掉页面级 intercept meta 后，手动拦截窗口上的原生输入。 */
     private void bindNativeInterception() {
-        if (window == null) {
+        if (document == null) {
             return;
         }
-        for (String type : new String[]{"mousedown", "mouseup", "click", "wheel", "contextmenu"}) {
-            window.addEventListener(type, e -> {
+        // 整个窗口 document 都拦截鼠标事件，阻止传递给原版 Screen。
+        for (String type : new String[]{"mousedown", "mouseup", "click", "dblclick", "wheel", "contextmenu", "mousemove"}) {
+            document.addEventListener(type, e -> {
                 if (e instanceof MouseEvent me) {
+                    // 输入框需要原生鼠标事件来定位光标，不拦截。
+                    if (e.target instanceof Element target && target.closest("input") != null) {
+                        return;
+                    }
                     me.consumeNative();
                 }
             });
@@ -586,6 +605,39 @@ public final class FileExplorerController {
         if (search != null) {
             search.focus();
         }
+    }
+
+    // ---------- 地址栏历史记录 ----------
+
+    private void bindHistory() {
+        Element button = document.getElementById("fe-history-btn");
+        if (button == null) {
+            return;
+        }
+        button.addEventListener("click", e -> {
+            Element.DOMRect rect = button.getBoundingClientRect();
+            if (rect != null) {
+                showHistoryMenu(rect.left, rect.bottom + 2);
+            }
+        });
+    }
+
+    private void showHistoryMenu(double x, double y) {
+        List<CtxEntry> entries = new ArrayList<>();
+        entries.add(CtxEntry.header("最近访问"));
+        if (navHistory.isEmpty()) {
+            entries.add(CtxEntry.action("暂无历史", () -> {
+            }));
+        } else {
+            for (String key : navHistory) {
+                VirtualFileSystem.Folder folder = fs.folder(key);
+                if (folder == null) {
+                    continue;
+                }
+                entries.add(CtxEntry.action(pathText(key), () -> navigateTo(key)));
+            }
+        }
+        openContextMenu(x, y, entries);
     }
 
     // ---------- 地址栏编辑 ----------
@@ -1413,6 +1465,7 @@ public final class FileExplorerController {
         entries.add(CtxEntry.action("剪切", this::cut));
         entries.add(CtxEntry.action("复制", this::copy));
         entries.add(CtxEntry.action("复制路径", () -> copyPath(entry)));
+        entries.add(CtxEntry.action("创建快捷方式", () -> createShortcut(entry)));
         if (entry.folder && entry.childKey != null) {
             String key = entry.childKey;
             entries.add(CtxEntry.action(pinned.contains(key) ? "从快速访问取消固定" : "固定到快速访问", () -> togglePin(key)));
@@ -1462,6 +1515,8 @@ public final class FileExplorerController {
         entries.add(CtxEntry.separator());
         entries.add(CtxEntry.actionChecked("列表", "list".equals(viewMode), () -> setViewMode("list")));
         entries.add(CtxEntry.actionChecked("详细信息", "details".equals(viewMode), () -> setViewMode("details")));
+        entries.add(CtxEntry.actionChecked("内容", "content".equals(viewMode), () -> setViewMode("content")));
+        entries.add(CtxEntry.actionChecked("平铺", "tiles".equals(viewMode), () -> setViewMode("tiles")));
         entries.add(CtxEntry.separator());
         entries.add(CtxEntry.actionChecked("紧凑视图", compact, this::toggleCompact));
         entries.add(CtxEntry.separator());
@@ -1492,6 +1547,8 @@ public final class FileExplorerController {
         menu.setInlineStyleProperty("top", px(top));
         menu.setInlineStyleProperty("display", "block");
         contextMenuOpen = true;
+        contextFocusIndex = -1;
+        bindContextKeyboard(menu, actions);
 
         for (Element item : menu.querySelectorAll(".fe-ctx-item")) {
             item.addEventListener("click", e -> {
@@ -1512,6 +1569,56 @@ public final class FileExplorerController {
                 } catch (NumberFormatException ignored) {
                 }
             });
+        }
+    }
+
+    private void bindContextKeyboard(Element menu, List<Runnable> actions) {
+        document.addEventListener("keydown", e -> {
+            if (!contextMenuOpen || !(e instanceof KeyEvent ke)) {
+                return;
+            }
+            if (e.target instanceof Element target && target.closest("input") != null) {
+                return;
+            }
+            List<Element> items = menu.querySelectorAll(".fe-ctx-item[data-i]");
+            if (items.isEmpty()) {
+                return;
+            }
+            if ("ArrowDown".equalsIgnoreCase(ke.key) || "Down".equalsIgnoreCase(ke.key)) {
+                contextFocusIndex = (contextFocusIndex + 1) % items.size();
+            } else if ("ArrowUp".equalsIgnoreCase(ke.key) || "Up".equalsIgnoreCase(ke.key)) {
+                contextFocusIndex = contextFocusIndex <= 0 ? items.size() - 1 : contextFocusIndex - 1;
+            } else if ("Enter".equalsIgnoreCase(ke.key)) {
+                if (contextFocusIndex >= 0 && contextFocusIndex < items.size()) {
+                    Element item = items.get(contextFocusIndex);
+                    String idx = item.getAttribute("data-i");
+                    closeContextMenu();
+                    try {
+                        int index = Integer.parseInt(idx);
+                        if (index >= 0 && index < actions.size() && actions.get(index) != null) {
+                            actions.get(index).run();
+                        }
+                    } catch (NumberFormatException ignored) {
+                    }
+                }
+                return;
+            } else if ("Escape".equalsIgnoreCase(ke.key)) {
+                closeContextMenu();
+                return;
+            } else {
+                return;
+            }
+            updateContextFocus(menu, items);
+        });
+    }
+
+    private void updateContextFocus(Element menu, List<Element> items) {
+        for (int i = 0; i < items.size(); i++) {
+            if (i == contextFocusIndex) {
+                items.get(i).getClassList().add("ctx-focused");
+            } else {
+                items.get(i).getClassList().remove("ctx-focused");
+            }
         }
     }
 
@@ -1619,6 +1726,7 @@ public final class FileExplorerController {
         clipboardCut = true;
         setStatus("已剪切 " + clipboard.size() + " 个项目");
         updateCommandButtons();
+        updateSelectionVisuals();
     }
 
     private void copy() {
@@ -1747,6 +1855,24 @@ public final class FileExplorerController {
         updateStatusBar();
     }
 
+    /** 选中指定分组下的全部条目（含折叠未渲染的条目）。 */
+    private void selectGroup(String group) {
+        selected.clear();
+        VirtualFileSystem.Folder folder = fs.folder(currentKey);
+        if (folder == null) {
+            updateSelectionVisuals();
+            updateStatusBar();
+            return;
+        }
+        for (VirtualFileSystem.Entry entry : folder.entries) {
+            if (group.equals(groupLabel(entry))) {
+                selected.add(entry);
+            }
+        }
+        updateSelectionVisuals();
+        updateStatusBar();
+    }
+
     private void openPrimary() {
         if (!selected.isEmpty()) {
             openEntry(selected.iterator().next());
@@ -1837,9 +1963,12 @@ public final class FileExplorerController {
     }
 
     private void openEntry(VirtualFileSystem.Entry entry) {
-        if (entry.folder && entry.childKey != null) {
+        if (entry.childKey != null && fs.folder(entry.childKey) != null) {
+            // 文件夹或指向文件夹的快捷方式。
             navigateTo(entry.childKey);
-        } else if (!entry.folder) {
+        } else if (entry.folder) {
+            setStatus("无法打开文件夹：" + entry.name);
+        } else {
             setStatus("无法打开虚拟文件：" + entry.name);
         }
     }
@@ -1866,13 +1995,17 @@ public final class FileExplorerController {
         if (!me.controlKey) {
             return;
         }
-        List<String> modes = List.of("small", "medium", "large", "xlarge");
+        // Windows 资源管理器 Ctrl+滚轮顺序（从大到小）：
+        // 超大图标 -> 大图标 -> 中等图标 -> 小图标 -> 列表 -> 详细信息 -> 内容 -> 平铺。
+        // 向上滚（deltaY<0）变"小一档"，向下滚变"大一档"，两端截断，不循环。
+        List<String> modes = List.of("xlarge", "large", "medium", "small", "list", "details", "content", "tiles");
         int idx = modes.indexOf(viewMode);
         if (idx < 0) {
-            setViewMode(me.deltaY < 0 ? "large" : "small");
-            return;
+            idx = 3;
         }
-        int next = me.deltaY < 0 ? Math.min(idx + 1, modes.size() - 1) : Math.max(idx - 1, 0);
+        int next = me.deltaY < 0
+                ? Math.max(0, idx - 1)
+                : Math.min(modes.size() - 1, idx + 1);
         setViewMode(modes.get(next));
     }
 
@@ -1913,6 +2046,7 @@ public final class FileExplorerController {
 
     private void setGroupBy(String value) {
         groupBy = value;
+        collapsedGroups.clear();
         renderContent();
     }
 
@@ -1958,17 +2092,25 @@ public final class FileExplorerController {
             sb.append("<div class=\"fe-details-line\">类型：").append(escape(entry.type)).append("</div>");
             if (entry.folder) {
                 sb.append("<div class=\"fe-details-line\">文件夹</div>");
+                sb.append("<div class=\"fe-details-line\">包含：").append(childCount(entry.childKey)).append(" 个项目</div>");
             } else {
                 sb.append("<div class=\"fe-details-line\">大小：").append(formatSize(entry.size)).append("</div>");
+                sb.append("<div class=\"fe-details-line\">字节数：").append(entry.size).append(" 字节</div>");
             }
-            sb.append("<div class=\"fe-details-line\">修改：").append(escape(entry.modified)).append("</div>");
+            sb.append("<div class=\"fe-details-line\">修改日期：").append(escape(entry.modified)).append("</div>");
             sb.append("<div class=\"fe-details-line\">位置：").append(escape(pathText(currentKey))).append("</div>");
+            sb.append("<div class=\"fe-details-line\">属性：只读</div>");
             pane.setInnerHTML(sb.toString());
         } else if (selected.size() > 1) {
             pane.setInnerHTML("<div class=\"fe-details-empty\">已选择 " + selected.size() + " 个项目</div>");
         } else {
             pane.setInnerHTML("<div class=\"fe-details-empty\">未选择任何项目</div>");
         }
+    }
+
+    private int childCount(String key) {
+        VirtualFileSystem.Folder folder = fs.folder(key);
+        return folder == null ? 0 : folder.entries.size();
     }
 
     private void applyNavVisibility() {
@@ -2004,10 +2146,18 @@ public final class FileExplorerController {
         if (pane == null) {
             return;
         }
+        StringBuilder toolbar = new StringBuilder();
+        toolbar.append("<div class=\"fe-preview-toolbar\">");
+        toolbar.append(previewSizeButton("小", 48));
+        toolbar.append(previewSizeButton("中", 64));
+        toolbar.append(previewSizeButton("大", 128));
+        toolbar.append("</div>");
+
         if (selected.size() == 1) {
             VirtualFileSystem.Entry entry = selected.iterator().next();
             StringBuilder sb = new StringBuilder();
-            sb.append("<div class=\"fe-preview-icon\">").append(iconFor(entry, 64)).append("</div>");
+            sb.append(toolbar);
+            sb.append("<div class=\"fe-preview-icon\">").append(iconFor(entry, previewSize)).append("</div>");
             sb.append("<div class=\"fe-preview-name\">").append(escape(entry.name)).append("</div>");
             sb.append("<div class=\"fe-preview-line\">类型：").append(escape(entry.type)).append("</div>");
             if (entry.folder) {
@@ -2018,9 +2168,30 @@ public final class FileExplorerController {
             sb.append("<div class=\"fe-preview-line\">修改：").append(escape(entry.modified)).append("</div>");
             pane.setInnerHTML(sb.toString());
         } else if (selected.size() > 1) {
-            pane.setInnerHTML("<div class=\"fe-preview-empty\">已选择 " + selected.size() + " 个项目</div>");
+            pane.setInnerHTML(toolbar.toString() + "<div class=\"fe-preview-empty\">已选择 " + selected.size() + " 个项目</div>");
         } else {
-            pane.setInnerHTML("<div class=\"fe-preview-empty\">未选择任何项目</div>");
+            pane.setInnerHTML(toolbar.toString() + "<div class=\"fe-preview-empty\">未选择任何项目</div>");
+        }
+        bindPreviewSizeButtons();
+    }
+
+    private String previewSizeButton(String label, int size) {
+        boolean active = previewSize == size;
+        return "<button class=\"fe-preview-size" + (active ? " active" : "") + "\" data-size=\"" + size + "\">" + label + "</button>";
+    }
+
+    private void bindPreviewSizeButtons() {
+        for (Element btn : document.querySelectorAll(".fe-preview-size")) {
+            String sizeStr = btn.getAttribute("data-size");
+            btn.addEventListener("click", e -> {
+                if (sizeStr != null) {
+                    try {
+                        previewSize = Integer.parseInt(sizeStr);
+                    } catch (NumberFormatException ignored) {
+                    }
+                    updatePreview();
+                }
+            });
         }
     }
 
@@ -2069,6 +2240,12 @@ public final class FileExplorerController {
         Element search = document.getElementById("fe-search");
         if (search != null) {
             search.setValue("");
+        }
+        // 记录导航历史（去重，最近在前）。
+        navHistory.remove(currentKey);
+        navHistory.add(0, currentKey);
+        if (navHistory.size() > 20) {
+            navHistory.remove(navHistory.size() - 1);
         }
         updateSearchPlaceholder();
         renderContent();
@@ -2234,6 +2411,11 @@ public final class FileExplorerController {
         if (content == null) {
             return;
         }
+        // 视图模式类：控制图标网格的列宽与图标尺寸，切换布局而不是单纯缩放。
+        content.getClassList().remove("fe-view-small", "fe-view-medium", "fe-view-large", "fe-view-xlarge");
+        if ("small".equals(viewMode) || "medium".equals(viewMode) || "large".equals(viewMode) || "xlarge".equals(viewMode)) {
+            content.getClassList().add("fe-view-" + viewMode);
+        }
         renderedEntryList.clear();
         lastClickedIndex = -1;
         if (topLevelEntries().isEmpty()) {
@@ -2241,7 +2423,9 @@ public final class FileExplorerController {
         } else {
             content.setInnerHTML(switch (viewMode) {
                 case "details" -> buildTable();
+                case "content" -> buildContent();
                 case "list" -> buildList();
+                case "tiles" -> buildTiles();
                 default -> buildGrid();
             });
         }
@@ -2265,8 +2449,27 @@ public final class FileExplorerController {
                 entries.add(entry);
             }
         }
-        sortEntries(entries);
+        // 有分组时先按分组标签排序，组内再按常规排序；否则只按常规排序。
+        if (groupBy != null && !groupBy.isEmpty()) {
+            entries.sort((a, b) -> {
+                int cmp = groupLabel(a).compareToIgnoreCase(groupLabel(b));
+                if (cmp != 0) {
+                    return cmp;
+                }
+                return compareEntries(a, b);
+            });
+        } else {
+            sortEntries(entries);
+        }
         return entries;
+    }
+
+    /** 组内排序（文件夹优先 + 名称）。 */
+    private int compareEntries(VirtualFileSystem.Entry a, VirtualFileSystem.Entry b) {
+        if (a.folder != b.folder) {
+            return a.folder ? -1 : 1;
+        }
+        return a.name.compareToIgnoreCase(b.name);
     }
 
     private String displayName(VirtualFileSystem.Entry entry) {
@@ -2282,12 +2485,69 @@ public final class FileExplorerController {
 
     private String groupLabel(VirtualFileSystem.Entry entry) {
         return switch (groupBy == null ? "" : groupBy) {
-            case "name" -> entry.name.isEmpty() ? "" : entry.name.substring(0, 1).toUpperCase();
-            case "modified" -> entry.modified;
+            case "name" -> entry.name.isEmpty() ? "" : String.valueOf(firstLetter(entry.name.charAt(0)));
+            case "modified" -> modifiedGroup(entry.modified);
             case "type" -> entry.type;
             case "size" -> entry.folder ? "文件夹" : sizeGroup(entry.size);
             default -> "";
         };
+    }
+
+    /** 名称分组的首字母：中文按 GB2312 区位推拼音首字母，其它字符取大写首字母。 */
+    private static char firstLetter(char ch) {
+        if (ch >= 0x4e00 && ch <= 0x9fa5) {
+            try {
+                byte[] gbk = String.valueOf(ch).getBytes("GBK");
+                if (gbk.length == 2) {
+                    int code = ((gbk[0] & 0xff) << 8) | (gbk[1] & 0xff);
+                    if (code >= 0xB0A1 && code < 0xB0C5) return 'A';
+                    if (code < 0xB2C1) return 'B';
+                    if (code < 0xB4EE) return 'C';
+                    if (code < 0xB6EA) return 'D';
+                    if (code < 0xB7A2) return 'E';
+                    if (code < 0xB8C1) return 'F';
+                    if (code < 0xB9FE) return 'G';
+                    if (code < 0xBBF7) return 'H';
+                    if (code < 0xBFA6) return 'J';
+                    if (code < 0xC0AC) return 'K';
+                    if (code < 0xC2E8) return 'L';
+                    if (code < 0xC4C3) return 'M';
+                    if (code < 0xC5B6) return 'N';
+                    if (code < 0xC5BE) return 'O';
+                    if (code < 0xC6DA) return 'P';
+                    if (code < 0xC8BB) return 'Q';
+                    if (code < 0xC8F6) return 'R';
+                    if (code < 0xCBFA) return 'S';
+                    if (code < 0xCDDA) return 'T';
+                    if (code < 0xCEF4) return 'W';
+                    if (code < 0xD1B9) return 'X';
+                    if (code < 0xD4D1) return 'Y';
+                    if (code < 0xD7FA) return 'Z';
+                }
+            } catch (Exception ignored) {
+            }
+            return ch;
+        }
+        return Character.toUpperCase(ch);
+    }
+
+    /** 修改日期按「yyyy年M月」分桶。 */
+    private static String modifiedGroup(String modified) {
+        if (modified == null) {
+            return "未知";
+        }
+        int firstSlash = modified.indexOf('/');
+        int secondSlash = modified.indexOf('/', firstSlash + 1);
+        if (firstSlash < 0 || secondSlash < 0) {
+            return modified;
+        }
+        try {
+            int y = Integer.parseInt(modified.substring(0, firstSlash).trim());
+            int m = Integer.parseInt(modified.substring(firstSlash + 1, secondSlash).trim());
+            return y + "年" + m + "月";
+        } catch (NumberFormatException e) {
+            return modified;
+        }
     }
 
     private static String sizeGroup(long size) {
@@ -2338,19 +2598,18 @@ public final class FileExplorerController {
         sb.append("</tr></thead><tbody>");
         List<VirtualFileSystem.Entry> entries = topLevelEntries();
         if (groupBy != null && !groupBy.isEmpty()) {
-            entries.sort((a, b) -> {
-                int cmp = groupLabel(a).compareToIgnoreCase(groupLabel(b));
-                return cmp != 0 ? cmp : a.name.compareToIgnoreCase(b.name);
-            });
             String currentGroup = null;
+            boolean currentCollapsed = false;
             for (VirtualFileSystem.Entry entry : entries) {
                 String label = groupLabel(entry);
                 if (!label.equals(currentGroup)) {
                     currentGroup = label;
-                    sb.append("<tr class=\"fe-group-row\" style=\"grid-template-columns:1fr;\"><td class=\"fe-group-header\">")
-                      .append(escape(label)).append("</td></tr>");
+                    currentCollapsed = collapsedGroups.contains(label);
+                    sb.append(groupHeaderHtml(label, currentCollapsed));
                 }
-                renderTableRow(sb, entry);
+                if (!currentCollapsed) {
+                    renderTableRow(sb, entry);
+                }
             }
         } else {
             for (VirtualFileSystem.Entry entry : entries) {
@@ -2361,6 +2620,23 @@ public final class FileExplorerController {
         return sb.toString();
     }
 
+    /** 分组头（表格行形式，供 details 视图使用）。 */
+    private String groupHeaderHtml(String label, boolean collapsed) {
+        return "<tr class=\"fe-group-row\" data-group=\"" + escape(label)
+                + "\" style=\"grid-template-columns:1fr;\"><td class=\"fe-group-header\">"
+                + "<span class=\"fe-group-toggle\">" + (collapsed ? "▸" : "▾") + "</span>"
+                + "<span class=\"fe-group-title\">" + escape(label) + "</span>"
+                + "</td></tr>";
+    }
+
+    /** 分组头（div 形式，供列表/内容/平铺/图标视图使用）。 */
+    private String groupHeaderDiv(String label, boolean collapsed) {
+        return "<div class=\"fe-group-div\" data-group=\"" + escape(label) + "\">"
+                + "<span class=\"fe-group-toggle\">" + (collapsed ? "▸" : "▾") + "</span>"
+                + "<span class=\"fe-group-title\">" + escape(label) + "</span>"
+                + "</div>";
+    }
+
     private String headerCell(String label, String field, int col) {
         boolean active = sortField.equals(field);
         return "<th class=\"sortable" + (active ? " sort-active" : "") + "\" data-sort=\"" + field + "\" data-col=\"" + col + "\">"
@@ -2369,7 +2645,7 @@ public final class FileExplorerController {
     }
 
     private void bindTableHeaders() {
-        for (Element th : document.querySelectorAll(".fe-table th[data-sort]")) {
+        for (Element th : document.querySelectorAll(".fe-table th[data-sort], .fe-list-header-cell[data-sort]")) {
             String field = th.getAttribute("data-sort");
             th.addEventListener("click", e -> {
                 if (field != null) {
@@ -2382,6 +2658,33 @@ public final class FileExplorerController {
                     showHeaderContextMenu(me.clientX, me.clientY);
                 }
             });
+        }
+        for (Element groupRow : document.querySelectorAll(".fe-group-row[data-group], .fe-group-div[data-group]")) {
+            String group = groupRow.getAttribute("data-group");
+            Element toggle = groupRow.querySelector(".fe-group-toggle");
+            Element title = groupRow.querySelector(".fe-group-title");
+            if (toggle != null) {
+                toggle.addEventListener("click", e -> {
+                    e.stopPropagation();
+                    if (group == null) {
+                        return;
+                    }
+                    if (collapsedGroups.contains(group)) {
+                        collapsedGroups.remove(group);
+                    } else {
+                        collapsedGroups.add(group);
+                    }
+                    renderContent();
+                });
+            }
+            if (title != null) {
+                title.addEventListener("click", e -> {
+                    e.stopPropagation();
+                    if (group != null) {
+                        selectGroup(group);
+                    }
+                });
+            }
         }
         for (Element handle : document.querySelectorAll(".fe-col-resizer")) {
             String colStr = handle.getAttribute("data-col");
@@ -2508,14 +2811,56 @@ public final class FileExplorerController {
             entries.add(CtxEntry.actionChecked(COL_LABELS[col], columnVisible[col], () -> toggleColumn(c)));
         }
         entries.add(CtxEntry.separator());
+        entries.add(CtxEntry.action("全部列显示", this::showAllColumns));
         entries.add(CtxEntry.action("重置列宽", this::resetColumnWidths));
         openContextMenu(x, y, entries);
     }
 
+    private void showAllColumns() {
+        for (int col = 0; col < columnVisible.length; col++) {
+            columnVisible[col] = true;
+        }
+        renderContent();
+    }
+
+    /**
+     * 渲染条目列表。启用了分组时，每个分组是一个独立 section：分组头 + 组内条目容器，
+     * 组内条目从各自的第一列重新排布；未分组时直接渲染到 itemsClass 容器。
+     */
+    private void appendEntriesWithGroups(StringBuilder sb, String itemsClass,
+                                         java.util.function.Consumer<VirtualFileSystem.Entry> renderer) {
+        List<VirtualFileSystem.Entry> entries = topLevelEntries();
+        if (groupBy != null && !groupBy.isEmpty()) {
+            java.util.Map<String, List<VirtualFileSystem.Entry>> groups = new java.util.LinkedHashMap<>();
+            for (VirtualFileSystem.Entry entry : entries) {
+                groups.computeIfAbsent(groupLabel(entry), k -> new ArrayList<>()).add(entry);
+            }
+            for (var groupEntry : groups.entrySet()) {
+                String label = groupEntry.getKey();
+                boolean collapsed = collapsedGroups.contains(label);
+                sb.append("<div class=\"fe-group-section\">");
+                sb.append(groupHeaderDiv(label, collapsed));
+                if (!collapsed) {
+                    sb.append("<div class=\"").append(itemsClass).append("\">");
+                    for (VirtualFileSystem.Entry entry : groupEntry.getValue()) {
+                        renderer.accept(entry);
+                    }
+                    sb.append("</div>");
+                }
+                sb.append("</div>");
+            }
+        } else {
+            sb.append("<div class=\"").append(itemsClass).append("\">");
+            for (VirtualFileSystem.Entry entry : entries) {
+                renderer.accept(entry);
+            }
+            sb.append("</div>");
+        }
+    }
+
     private String buildGrid() {
         StringBuilder sb = new StringBuilder();
-        sb.append("<div class=\"fe-grid\">");
-        for (VirtualFileSystem.Entry entry : topLevelEntries()) {
+        appendEntriesWithGroups(sb, "fe-grid", entry -> {
             int index = renderedEntryList.size();
             renderedEntryList.add(entry);
             sb.append("<div class=\"fe-item fe-grid-item\" data-id=\"e").append(index).append("\"")
@@ -2527,15 +2872,36 @@ public final class FileExplorerController {
             sb.append("<div class=\"fe-icon\">").append(iconFor(entry, iconSize)).append("</div>");
             sb.append("<div class=\"fe-name\">").append(escape(displayName(entry))).append("</div>");
             sb.append("</div>");
-        }
-        sb.append("</div>");
+        });
         return sb.toString();
     }
 
+    private String buildTiles() {
+        StringBuilder sb = new StringBuilder();
+        appendEntriesWithGroups(sb, "fe-tiles", entry -> {
+            int index = renderedEntryList.size();
+            renderedEntryList.add(entry);
+            sb.append("<div class=\"fe-item fe-tile-item\" data-id=\"e").append(index).append("\"")
+              .append(" data-folder=\"").append(entry.folder ? "1" : "0").append("\"")
+              .append(folderPathAttr(entry)).append(">");
+            if (checkboxes) {
+                sb.append("<span class=\"fe-check\" data-id=\"e").append(index).append("\"></span>");
+            }
+            sb.append("<div class=\"fe-icon\">").append(iconFor(entry, 48)).append("</div>");
+            sb.append("<div class=\"fe-tile-meta\">");
+            sb.append("<div class=\"fe-tile-name\">").append(escape(displayName(entry))).append("</div>");
+            sb.append("<div class=\"fe-tile-line\">").append(escape(entry.type)).append("</div>");
+            sb.append("<div class=\"fe-tile-line\">").append(entry.folder ? "文件夹" : formatSize(entry.size)).append("</div>");
+            sb.append("<div class=\"fe-tile-line\">").append(escape(entry.modified)).append("</div>");
+            sb.append("</div></div>");
+        });
+        return sb.toString();
+    }
+
+    /** 列表视图：小图标 + 名称，多列紧凑排列，无表头。 */
     private String buildList() {
         StringBuilder sb = new StringBuilder();
-        sb.append("<div class=\"fe-list\">");
-        for (VirtualFileSystem.Entry entry : topLevelEntries()) {
+        appendEntriesWithGroups(sb, "fe-list", entry -> {
             int index = renderedEntryList.size();
             renderedEntryList.add(entry);
             sb.append("<div class=\"fe-item fe-list-item\" data-id=\"e").append(index).append("\"")
@@ -2547,8 +2913,31 @@ public final class FileExplorerController {
             sb.append("<span class=\"fe-icon\">").append(iconFor(entry, 16)).append("</span>");
             sb.append("<span class=\"fe-name-text\">").append(escape(displayName(entry))).append("</span>");
             sb.append("</div>");
-        }
-        sb.append("</div>");
+        });
+        return sb.toString();
+    }
+
+    /** 内容视图：单列，每行小图标 + 名称 + 类型 + 大小 + 修改日期，无表头。 */
+    private String buildContent() {
+        StringBuilder sb = new StringBuilder();
+        appendEntriesWithGroups(sb, "fe-content-list", entry -> {
+            int index = renderedEntryList.size();
+            renderedEntryList.add(entry);
+            sb.append("<div class=\"fe-item fe-content-item\" data-id=\"e").append(index).append("\"")
+              .append(" data-folder=\"").append(entry.folder ? "1" : "0").append("\"")
+              .append(folderPathAttr(entry)).append(">");
+            if (checkboxes) {
+                sb.append("<span class=\"fe-check\" data-id=\"e").append(index).append("\"></span>");
+            }
+            sb.append("<span class=\"fe-icon\">").append(iconFor(entry, 16)).append("</span>");
+            sb.append("<div class=\"fe-content-meta\">");
+            sb.append("<div class=\"fe-content-name\">").append(escape(displayName(entry))).append("</div>");
+            sb.append("<div class=\"fe-content-details\">")
+              .append(escape(entry.type)).append(" · ")
+              .append(entry.folder ? "文件夹" : formatSize(entry.size)).append(" · ")
+              .append(escape(entry.modified)).append("</div>");
+            sb.append("</div></div>");
+        });
         return sb.toString();
     }
 
@@ -2629,6 +3018,27 @@ public final class FileExplorerController {
         int index = indexOf(item);
         boolean ctrl = event instanceof MouseEvent me && me.controlKey;
         boolean shift = event instanceof MouseEvent me && me.shiftKey;
+        int clickCount = event instanceof MouseEvent me ? me.clickCount : 1;
+
+        // 双击：打开（Windows 行为），优先级高于慢双击重命名。
+        if (!ctrl && !shift && clickCount >= 2) {
+            lastRenameCandidate = null;
+            lastRenameCandidateTime = 0L;
+            openEntry(entry);
+            return;
+        }
+
+        // 慢双击（间隔在阈值内的两次独立单击）进入重命名。
+        long now = System.currentTimeMillis();
+        if (!ctrl && !shift && lastRenameCandidate == entry && now - lastRenameCandidateTime <= 800L) {
+            lastRenameCandidate = null;
+            lastRenameCandidateTime = 0L;
+            beginRename(item, entry);
+            return;
+        }
+        lastRenameCandidate = entry;
+        lastRenameCandidateTime = now;
+
         if (shift && selectionAnchor >= 0) {
             selected.clear();
             int lo = Math.min(selectionAnchor, index);
@@ -2649,10 +3059,6 @@ public final class FileExplorerController {
         }
         lastClickedIndex = index;
 
-        if (event instanceof MouseEvent me && me.clickCount >= 2) {
-            openEntry(entry);
-            return;
-        }
         updateSelectionVisuals();
         updateStatusBar();
     }
@@ -2660,6 +3066,18 @@ public final class FileExplorerController {
     private VirtualFileSystem.Entry entryFor(Element item) {
         int index = indexOf(item);
         return index >= 0 && index < renderedEntryList.size() ? renderedEntryList.get(index) : null;
+    }
+
+    private boolean isCut(VirtualFileSystem.Entry entry) {
+        if (!clipboardCut) {
+            return false;
+        }
+        for (ClipItem item : clipboard) {
+            if (item.entry() == entry) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private int indexOf(Element item) {
@@ -2684,6 +3102,13 @@ public final class FileExplorerController {
                 item.getClassList().remove("selected");
             }
             item.setAttribute("aria-selected", isSelected ? "true" : "false");
+            // 剪切的条目虚化显示。
+            boolean isCut = entry != null && isCut(entry);
+            if (isCut) {
+                item.getClassList().add("cut");
+            } else {
+                item.getClassList().remove("cut");
+            }
         }
         for (Element check : document.querySelectorAll(".fe-check")) {
             VirtualFileSystem.Entry entry = entryFor(check);
@@ -2869,6 +3294,13 @@ public final class FileExplorerController {
             folder = folder.parentKey == null ? null : fs.folder(folder.parentKey);
         }
         return String.join(" > ", names);
+    }
+
+    private void createShortcut(VirtualFileSystem.Entry entry) {
+        String targetKey = entry.childKey;
+        pushUndo(fs.createShortcut(currentKey, entry, targetKey));
+        afterMutation();
+        setStatus("已创建快捷方式：" + entry.name);
     }
 
     private void copyPath(VirtualFileSystem.Entry entry) {
