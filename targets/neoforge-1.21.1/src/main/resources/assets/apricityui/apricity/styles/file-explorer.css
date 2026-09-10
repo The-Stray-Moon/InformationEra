@@ -710,6 +710,124 @@
     text-align: center;
 }
 
+.fe-empty-search-btn {
+    display: block;
+    margin: 12px auto 0;
+    padding: 6px 14px;
+    border: 2px solid var(--ore-edge);
+    color: #ffffff;
+    background: var(--ore-surface-deep);
+    cursor: pointer;
+    font-size: var(--ore-font-sm);
+}
+
+.fe-empty-search-btn:hover {
+    background: var(--ore-surface);
+    border-color: var(--ore-edge-light);
+}
+
+/* 驱动器容量条 */
+.fe-drive-bar {
+    width: 100%;
+    height: 6px;
+    margin: 4px 0 2px;
+    background: var(--ore-surface-deep);
+    border: 1px solid var(--ore-edge);
+    overflow: hidden;
+}
+
+.fe-drive-bar-fill {
+    height: 100%;
+    background: var(--ore-info);
+}
+
+.fe-drive-bar-text {
+    color: var(--ore-ink-muted);
+    font-size: 11px;
+    white-space: nowrap;
+}
+
+.fe-grid-item .fe-drive-bar {
+    width: 100%;
+    max-width: 140px;
+}
+
+/* 线性视图行高固定，供虚拟滚动使用 */
+.fe-vtable {
+    width: 100%;
+    background: var(--ore-canvas);
+}
+
+.fe-vthead {
+    display: grid;
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background: var(--ore-surface-deep);
+    border-bottom: 2px solid var(--ore-edge);
+}
+
+.fe-vthead .sortable {
+    position: relative;
+    padding: 6px 12px;
+    color: #ffffff;
+    background: var(--ore-surface-deep);
+    border-right: 2px solid var(--ore-edge);
+    font-size: var(--ore-font-sm);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+.fe-vthead .sortable:hover {
+    background: var(--ore-surface);
+}
+
+.fe-vthead .sort-active {
+    color: var(--ore-gold);
+}
+
+.fe-vbody {
+    position: relative;
+}
+
+.fe-vrow {
+    display: grid;
+    height: 34px;
+    border-bottom: 2px solid var(--ore-edge);
+    align-items: center;
+    font-size: var(--ore-font-sm);
+    cursor: pointer;
+}
+
+.fe-vrow:hover {
+    background: var(--ore-surface);
+}
+
+.fe-vrow.selected,
+.fe-vrow.selected:hover {
+    background: var(--ore-blue);
+}
+
+.fe-vrow .fe-cell,
+.fe-vrow .fe-vcell {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    padding: 0 12px;
+    border-right: 2px solid var(--ore-edge);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.fe-vrow .fe-vcell {
+    display: block;
+    line-height: 34px;
+}
+
 .fe-col-resizer {
     position: absolute;
     top: 0;

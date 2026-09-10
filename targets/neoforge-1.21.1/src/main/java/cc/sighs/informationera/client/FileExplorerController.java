@@ -9,6 +9,8 @@ import com.sighs.apricityui.layout.Position;
 import com.sighs.apricityui.layout.Size;
 import net.minecraft.client.Minecraft;
 
+import static cc.sighs.informationera.client.FileExplorerText.t;
+
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
@@ -31,12 +33,22 @@ public final class FileExplorerController {
     private static final double MIN_HEIGHT = 320;
     private static final double TITLEBAR_HEIGHT = 40;
     private static final double MENU_WIDTH = 230;
+    /** 线性视图（details/list/content）每行高度，用于虚拟滚动窗口计算。 */
+    private static final double ROW_HEIGHT = 34.0;
+    /** 虚拟滚动缓冲行数。 */
+    private static final int VIRTUAL_BUFFER = 12;
 
     private static final List<String> SIDEBAR_ROOTS = List.of(
-            "home", "desktop", "downloads", "documents", "pictures", "music", "videos", "thispc", "recyclebin");
+            "home", "desktop", "downloads", "documents", "pictures", "music", "videos",
+            "onedrive", "thispc", "thispc/libraries", "thispc/network", "recyclebin");
 
-    private static final String[] COL_FIELDS = {"name", "modified", "type", "size"};
-    private static final String[] COL_LABELS = {"名称", "修改日期", "类型", "大小"};
+    private static final String[] COL_FIELDS = {"name", "modified", "type", "size", "created", "author"};
+
+    private static String[] columnLabels() {
+        return new String[]{t("informationera.fe.name"), t("informationera.fe.modified"),
+                t("informationera.fe.type"), t("informationera.fe.size"),
+                t("informationera.fe.created"), t("informationera.fe.author")};
+    }
 
     private static FileExplorerController ACTIVE;
 
@@ -52,6 +64,7 @@ public final class FileExplorerController {
         int iconSize = 40;
         String sortField = "name";
         boolean sortAsc = true;
+        boolean foldersFirst = true;
         String searchQuery = "";
         int lastClickedIndex = -1;
     }
@@ -86,13 +99,14 @@ public final class FileExplorerController {
     private final List<VirtualFileSystem.Entry> renderedEntryList = new ArrayList<>();
     private final Set<String> expandedSidebar = new HashSet<>();
     private final Set<String> pinned = new HashSet<>();
-    private final List<Double> columnWidths = new ArrayList<>(List.of(320.0, 160.0, 120.0, 100.0));
-    private final boolean[] columnVisible = new boolean[]{true, true, true, true};
+    private final List<Double> columnWidths = new ArrayList<>(List.of(320.0, 160.0, 120.0, 100.0, 140.0, 100.0));
+    private final boolean[] columnVisible = new boolean[]{true, true, true, true, false, false};
 
     private String viewMode = "details";
     private int iconSize = 40;
     private String sortField = "name";
     private boolean sortAsc = true;
+    private boolean foldersFirst = true;
     private boolean showNav = true;
     private boolean checkboxes = false;
     private boolean previewOpen = false;
@@ -106,13 +120,9 @@ public final class FileExplorerController {
     private int lastClickedIndex = -1;
     private int selectionAnchor = -1;
     private final List<String> navHistory = new ArrayList<>();
-    private VirtualFileSystem.Entry lastRenameCandidate = null;
-    private long lastRenameCandidateTime = 0L;
+    private long lastClickTime = 0L;
+    private VirtualFileSystem.Entry lastClickEntry = null;
 
-    private final List<ClipItem> clipboard = new ArrayList<>();
-    private boolean clipboardCut = false;
-    private final Deque<Runnable> undoStack = new ArrayDeque<>();
-    private final Deque<Runnable> redoStack = new ArrayDeque<>();
 
     private String interaction = "none";
     private String resizeHandle = "";
@@ -128,6 +138,8 @@ public final class FileExplorerController {
     private double rubberTop;
     private double rubberWidth;
     private double rubberHeight;
+    private boolean rubberAdditive = false;
+    private double scrollTop = 0.0;
     private boolean contextMenuOpen = false;
     private int contextFocusIndex = -1;
     private int resizeColIndex = -1;
@@ -136,7 +148,7 @@ public final class FileExplorerController {
     private double navWidth = 240;
     private double previewWidth = 240;
 
-    private VirtualFileSystem.Entry rightDragEntry;
+    private List<VirtualFileSystem.Entry> rightDragEntries = new ArrayList<>();
     private String rightDragSourceKey;
     private String rightDropTargetKey;
 
@@ -178,7 +190,7 @@ public final class FileExplorerController {
 
     String currentFolderName() {
         VirtualFileSystem.Folder folder = fs.folder(currentKey);
-        return folder != null ? folder.name : "文件资源管理器";
+        return folder != null ? folder.name : t("informationera.fe.title");
     }
 
     /** 供任务栏逻辑调用：最小化/恢复，返回操作后的最小化状态。 */
@@ -222,6 +234,7 @@ public final class FileExplorerController {
         bindStatic();
         bindNativeInterception();
         bindKeyboard();
+        localizeStaticLabels();
         renderTabs();
         renderNavigation();
         renderContent();
@@ -260,6 +273,25 @@ public final class FileExplorerController {
         window.setInlineStyleProperty("top", px(windowY));
         window.setInlineStyleProperty("width", px(windowWidth));
         window.setInlineStyleProperty("height", px(windowHeight));
+    }
+
+    /** 把 HTML 里静态命令栏文案替换为当前语言。 */
+    private void localizeStaticLabels() {
+        setCmdLabel("fe-new", t("informationera.fe.new"));
+        setCmdLabel("fe-sort", t("informationera.fe.sort"));
+        setCmdLabel("fe-layout", t("informationera.fe.layout"));
+        setCmdLabel("fe-preview", t("informationera.fe.preview"));
+    }
+
+    private void setCmdLabel(String id, String text) {
+        Element button = document.getElementById(id);
+        if (button == null) {
+            return;
+        }
+        Element label = button.querySelector(".fe-cmd-label");
+        if (label != null) {
+            label.setTextContent(text);
+        }
     }
 
     // ---------- 静态元素与事件绑定 ----------
@@ -330,23 +362,23 @@ public final class FileExplorerController {
         bindMenuButton("fe-sort", this::showSortMenu);
         bindMenuButton("fe-layout", this::showLayoutMenu);
 
-        bindButtonHint("fe-min", "最小化");
-        bindButtonHint("fe-max", "最大化");
-        bindButtonHint("fe-close", "关闭");
-        bindButtonHint("fe-back", "后退");
-        bindButtonHint("fe-forward", "前进");
-        bindButtonHint("fe-up", "向上");
-        bindButtonHint("fe-new", "新建");
-        bindButtonHint("fe-cmd-cut", "剪切");
-        bindButtonHint("fe-cmd-copy", "复制");
-        bindButtonHint("fe-cmd-paste", "粘贴");
-        bindButtonHint("fe-cmd-rename", "重命名");
-        bindButtonHint("fe-cmd-delete", "删除");
-        bindButtonHint("fe-sort", "排序");
-        bindButtonHint("fe-layout", "查看");
-        bindButtonHint("fe-preview", "预览窗格");
-        bindButtonHint("fe-view-details", "详细信息");
-        bindButtonHint("fe-view-thumb", "大缩略图");
+        bindButtonHint("fe-min", t("informationera.fe.min"));
+        bindButtonHint("fe-max", t("informationera.fe.max"));
+        bindButtonHint("fe-close", t("informationera.fe.close"));
+        bindButtonHint("fe-back", t("informationera.fe.back"));
+        bindButtonHint("fe-forward", t("informationera.fe.forward"));
+        bindButtonHint("fe-up", t("informationera.fe.up"));
+        bindButtonHint("fe-new", t("informationera.fe.new"));
+        bindButtonHint("fe-cmd-cut", t("informationera.fe.cut"));
+        bindButtonHint("fe-cmd-copy", t("informationera.fe.copy"));
+        bindButtonHint("fe-cmd-paste", t("informationera.fe.paste"));
+        bindButtonHint("fe-cmd-rename", t("informationera.fe.rename"));
+        bindButtonHint("fe-cmd-delete", t("informationera.fe.delete"));
+        bindButtonHint("fe-sort", t("informationera.fe.sort"));
+        bindButtonHint("fe-layout", t("informationera.fe.layout"));
+        bindButtonHint("fe-preview", t("informationera.fe.preview"));
+        bindButtonHint("fe-view-details", t("informationera.fe.details"));
+        bindButtonHint("fe-view-thumb", t("informationera.fe.thumb"));
 
         Element search = document.getElementById("fe-search");
         if (search != null) {
@@ -394,7 +426,7 @@ public final class FileExplorerController {
                 if (target == null || (target.closest(".fe-item") == null
                         && target.closest("th") == null
                         && target.closest(".fe-group-row") == null)) {
-                    beginRubber(me.clientX, me.clientY);
+                    beginRubber(me.clientX, me.clientY, me.controlKey);
                 }
             });
             content.addEventListener("contextmenu", e -> {
@@ -419,6 +451,7 @@ public final class FileExplorerController {
                     }
                 }
             });
+            content.addEventListener("scroll", e -> onContentScroll());
         }
 
         Element contextMenu = document.getElementById("fe-context-menu");
@@ -578,7 +611,7 @@ public final class FileExplorerController {
             } else if (ctrl && "w".equalsIgnoreCase(key)) {
                 closeTab(activeTab);
             } else if (ctrl && "n".equalsIgnoreCase(key)) {
-                newTab();
+                FileExplorerWindow.open();
             } else if (ctrl && "a".equalsIgnoreCase(key)) {
                 selectAll();
             } else if (ctrl && "c".equalsIgnoreCase(key)) {
@@ -601,6 +634,10 @@ public final class FileExplorerController {
                 navigateForward();
             } else if (alt && ("ArrowUp".equalsIgnoreCase(key) || "Up".equalsIgnoreCase(key))) {
                 navigateUp();
+            } else if (alt && ("Enter".equalsIgnoreCase(key))) {
+                showProperties();
+            } else if (shift && "F10".equalsIgnoreCase(key)) {
+                showContextMenuAtCurrent();
             } else if ("ArrowDown".equalsIgnoreCase(key) || "Down".equalsIgnoreCase(key)) {
                 moveSelection(1, shift);
             } else if ("ArrowUp".equalsIgnoreCase(key) || "Up".equalsIgnoreCase(key)) {
@@ -613,12 +650,12 @@ public final class FileExplorerController {
                 moveSelectionTo(0, shift);
             } else if ("End".equalsIgnoreCase(key)) {
                 moveSelectionTo(renderedEntryList.size() - 1, shift);
-            } else if ("Delete".equals(key) && !shift && !ctrl && !alt) {
+            } else if ("Delete".equals(key) && !ctrl && !alt) {
                 delete();
             } else if ("Enter".equals(key) && !shift && !ctrl && !alt) {
                 openPrimary();
             } else if ("Backspace".equals(key) && !shift && !ctrl && !alt) {
-                navigateUp();
+                navigateBack();
             } else if ("F2".equals(key) && !shift && !ctrl && !alt) {
                 renamePrimary();
             }
@@ -659,9 +696,9 @@ public final class FileExplorerController {
 
     private void showHistoryMenu(double x, double y) {
         List<CtxEntry> entries = new ArrayList<>();
-        entries.add(CtxEntry.header("最近访问"));
+        entries.add(CtxEntry.header(t("informationera.fe.recent")));
         if (navHistory.isEmpty()) {
-            entries.add(CtxEntry.action("暂无历史", () -> {
+            entries.add(CtxEntry.action(t("informationera.fe.no_history"), () -> {
             }));
         } else {
             for (String key : navHistory) {
@@ -750,7 +787,7 @@ public final class FileExplorerController {
             key = resolvePath(raw);
         }
         if (key == null) {
-            setStatus("路径不存在：" + raw);
+            setStatus(t("informationera.fe.status_path_not_found", raw));
             return;
         }
         if (key.equals(currentKey)) {
@@ -760,7 +797,8 @@ public final class FileExplorerController {
     }
 
     private String resolvePath(String raw) {
-        String[] parts = raw.replace('\\', '/').split("/");
+        // 用 / \ > 任意组合分隔。
+        String[] parts = raw.replace('\\', '/').replace('>', '/').split("/");
         List<String> names = new ArrayList<>();
         for (String part : parts) {
             String t = part.trim();
@@ -771,24 +809,47 @@ public final class FileExplorerController {
         if (names.isEmpty()) {
             return null;
         }
-        String key = null;
-        if (names.get(0).equalsIgnoreCase("此电脑") || names.get(0).equalsIgnoreCase("我的电脑")) {
+
+        String key;
+        String first = names.get(0);
+        if (first.equalsIgnoreCase("此电脑") || first.equalsIgnoreCase("我的电脑") || first.equalsIgnoreCase("thispc")) {
             key = "thispc";
-        } else if (names.get(0).equalsIgnoreCase("主文件夹")) {
+        } else if (first.equalsIgnoreCase("主文件夹") || first.equalsIgnoreCase("home")) {
             key = "home";
+        } else if (first.equalsIgnoreCase("回收站") || first.equalsIgnoreCase("recyclebin")) {
+            key = "recyclebin";
+        } else if (first.equalsIgnoreCase("桌面") || first.equalsIgnoreCase("desktop")) {
+            key = "desktop";
+        } else if (first.equalsIgnoreCase("下载") || first.equalsIgnoreCase("downloads")) {
+            key = "downloads";
+        } else if (first.equalsIgnoreCase("文档") || first.equalsIgnoreCase("documents")) {
+            key = "documents";
+        } else if (first.equalsIgnoreCase("图片") || first.equalsIgnoreCase("pictures")) {
+            key = "pictures";
+        } else if (first.equalsIgnoreCase("音乐") || first.equalsIgnoreCase("music")) {
+            key = "music";
+        } else if (first.equalsIgnoreCase("视频") || first.equalsIgnoreCase("videos")) {
+            key = "videos";
+        } else if (first.equalsIgnoreCase("onedrive")) {
+            key = "onedrive";
         } else {
             // 相对当前目录的简单名。
-            String first = fs.resolve(names.get(0));
-            if (first != null) {
-                key = first;
+            String resolved = fs.resolve(first);
+            if (resolved != null) {
+                key = resolved;
+            } else {
+                key = findChild(currentKey, first);
             }
         }
-        if (key == null) {
-            // 以当前目录为基准解析第一个名字。
-            key = findChild(currentKey, names.get(0));
-        }
+
         for (int i = 1; key != null && i < names.size(); i++) {
-            key = findChild(key, names.get(i));
+            String name = names.get(i);
+            if ("..".equals(name)) {
+                VirtualFileSystem.Folder parent = fs.folder(key);
+                key = parent == null ? null : parent.parentKey;
+            } else {
+                key = findChild(key, name);
+            }
         }
         return key;
     }
@@ -882,10 +943,11 @@ public final class FileExplorerController {
         tab.iconSize = iconSize;
         tab.sortField = sortField;
         tab.sortAsc = sortAsc;
+        tab.foldersFirst = foldersFirst;
         tab.searchQuery = searchQuery;
         tab.lastClickedIndex = lastClickedIndex;
         VirtualFileSystem.Folder folder = fs.folder(currentKey);
-        tab.title = folder != null ? folder.name : "文件资源管理器";
+        tab.title = folder != null ? folder.name : t("informationera.fe.title");
     }
 
     private void loadTab(Tab tab) {
@@ -902,6 +964,7 @@ public final class FileExplorerController {
         iconSize = tab.iconSize;
         sortField = tab.sortField;
         sortAsc = tab.sortAsc;
+        foldersFirst = tab.foldersFirst;
         searchQuery = tab.searchQuery;
         lastClickedIndex = tab.lastClickedIndex;
     }
@@ -958,7 +1021,7 @@ public final class FileExplorerController {
         Tab tab = new Tab();
         tab.currentKey = currentKey;
         VirtualFileSystem.Folder folder = fs.folder(currentKey);
-        tab.title = folder != null ? folder.name : "文件资源管理器";
+        tab.title = folder != null ? folder.name : t("informationera.fe.title");
         tabs.add(tab);
         activeTab = tabs.size() - 1;
         loadTab(tab);
@@ -1026,10 +1089,11 @@ public final class FileExplorerController {
         activateCapture();
     }
 
-    private void beginRubber(double mouseX, double mouseY) {
+    private void beginRubber(double mouseX, double mouseY, boolean additive) {
         interaction = "rubber";
         rubberStartX = mouseX;
         rubberStartY = mouseY;
+        rubberAdditive = additive;
         if (selectionRect != null) {
             selectionRect.setInlineStyleProperty("display", "block");
         }
@@ -1197,7 +1261,9 @@ public final class FileExplorerController {
     }
 
     private void finishRubber() {
-        selected.clear();
+        if (!rubberAdditive) {
+            selected.clear();
+        }
         for (Element item : document.querySelectorAll(".fe-item")) {
             VirtualFileSystem.Entry entry = entryFor(item);
             if (entry == null) {
@@ -1265,8 +1331,18 @@ public final class FileExplorerController {
 
     // ---------- 跨窗口拖拽原语（由 FileExplorerWindow 全局引擎调用） ----------
 
-    String ghostHtmlFor(VirtualFileSystem.Entry entry) {
-        return "<div class=\"fe-ghost-row\">" + iconFor(entry, 16) + "<span>" + escape(entry.name) + "</span></div>";
+    String ghostHtmlFor(List<VirtualFileSystem.Entry> entries) {
+        if (entries.isEmpty()) {
+            return "";
+        }
+        if (entries.size() == 1) {
+            VirtualFileSystem.Entry entry = entries.get(0);
+            return "<div class=\"fe-ghost-row\">" + iconFor(entry, 16) + "<span>" + escape(entry.name) + "</span></div>";
+        }
+        StringBuilder sb = new StringBuilder("<div class=\"fe-ghost-row\">");
+        sb.append(folderIcon(16)).append("<span>").append(t("informationera.fe.items", entries.size())).append("</span>");
+        sb.append("</div>");
+        return sb.toString();
     }
 
     /** 命中本窗口内需要覆盖系统光标的元素：ew/ns/nwse/pointer；无匹配返回 null。 */
@@ -1324,21 +1400,53 @@ public final class FileExplorerController {
 
     /** 执行一次移动/复制；成功返回 true 并刷新自身。 */
     boolean moveOrCopy(String sourceKey, VirtualFileSystem.Entry entry, String targetKey, boolean copy) {
-        if (entry.folder && entry.childKey != null && targetKey.startsWith(entry.childKey)) {
-            setStatus("不能移动到自身内部");
+        return moveOrCopy(sourceKey, List.of(entry), targetKey, copy);
+    }
+
+    /** 批量移动/复制（多选拖拽）。成功返回 true 并刷新自身。 */
+    boolean moveOrCopy(String sourceKey, List<VirtualFileSystem.Entry> entries, String targetKey, boolean copy) {
+        boolean any = false;
+        List<Runnable> undos = new ArrayList<>();
+        int count = 0;
+        for (VirtualFileSystem.Entry entry : entries) {
+            if (entry.folder && entry.childKey != null && targetKey.startsWith(entry.childKey)) {
+                continue;
+            }
+            if (targetKey.equals(sourceKey) && !copy) {
+                continue;
+            }
+            if (copy) {
+                undos.add(fs.duplicateInto(targetKey, entry));
+            } else {
+                undos.add(fs.move(sourceKey, targetKey, entry));
+            }
+            any = true;
+            count++;
+        }
+        if (!any) {
+            setStatus(copy ? t("informationera.fe.status_cannot_copy") : t("informationera.fe.status_cannot_move"));
             return false;
         }
-        if (targetKey.equals(sourceKey) && !copy) {
-            return false;
-        }
-        if (copy) {
-            pushUndo(fs.duplicateInto(targetKey, entry));
-            setStatus("已复制到目标文件夹");
-        } else {
-            pushUndo(fs.move(sourceKey, targetKey, entry));
-            setStatus("已移动到目标文件夹");
-        }
+        pushUndo(() -> undos.forEach(Runnable::run));
         afterMutation();
+        setStatus(copy ? t("informationera.fe.status_copied_to", count) : t("informationera.fe.status_moved", count));
+        return true;
+    }
+
+    /** 拖拽创建快捷方式到目标文件夹。 */
+    boolean createShortcuts(String sourceKey, List<VirtualFileSystem.Entry> entries, String targetKey) {
+        List<Runnable> undos = new ArrayList<>();
+        int count = 0;
+        for (VirtualFileSystem.Entry entry : entries) {
+            undos.add(fs.createShortcut(targetKey, sourceKey, entry));
+            count++;
+        }
+        if (count == 0) {
+            return false;
+        }
+        pushUndo(() -> undos.forEach(Runnable::run));
+        afterMutation();
+        setStatus(t("informationera.fe.status_shortcuts_created", count));
         return true;
     }
 
@@ -1348,9 +1456,9 @@ public final class FileExplorerController {
     }
 
     /** 右键拖拽跨窗口落下：在当前窗口弹出“移动到此处/复制到此处”菜单。 */
-    void showExternalDropMenu(VirtualFileSystem.Entry entry, String sourceKey, String targetKey,
+    void showExternalDropMenu(List<VirtualFileSystem.Entry> entries, String sourceKey, String targetKey,
                               Position screenPos, FileExplorerController sourceController) {
-        rightDragEntry = entry;
+        rightDragEntries = new ArrayList<>(entries);
         rightDragSourceKey = sourceKey;
         rightDropTargetKey = targetKey;
         Position p = document.screenToDocumentPosition(screenPos);
@@ -1358,17 +1466,17 @@ public final class FileExplorerController {
     }
 
     private void showDropMenuFor(double x, double y, FileExplorerController sourceController) {
-        if (rightDragEntry == null || rightDragSourceKey == null) {
+        if (rightDragEntries.isEmpty() || rightDragSourceKey == null) {
             return;
         }
         List<CtxEntry> entries = new ArrayList<>();
-        entries.add(CtxEntry.action("移动到此处", () -> performRightDrop(false, sourceController)));
-        entries.add(CtxEntry.action("复制到此处", () -> performRightDrop(true, sourceController)));
+        entries.add(CtxEntry.action(t("informationera.fe.move_here"), () -> performRightDrop(false, sourceController)));
+        entries.add(CtxEntry.action(t("informationera.fe.copy_here"), () -> performRightDrop(true, sourceController)));
         entries.add(CtxEntry.separator());
-        entries.add(CtxEntry.submenu("移动到文件夹", folderChoices(false, sourceController)));
-        entries.add(CtxEntry.submenu("复制到文件夹", folderChoices(true, sourceController)));
+        entries.add(CtxEntry.submenu(t("informationera.fe.move_to_folder"), folderChoices(false, sourceController)));
+        entries.add(CtxEntry.submenu(t("informationera.fe.copy_to_folder"), folderChoices(true, sourceController)));
         entries.add(CtxEntry.separator());
-        entries.add(CtxEntry.action("取消", () -> {
+        entries.add(CtxEntry.action(t("informationera.fe.cancel"), () -> {
         }));
         openContextMenu(x, y, entries);
     }
@@ -1379,7 +1487,7 @@ public final class FileExplorerController {
         collectFolderChoices(result, "thispc", copy, sourceController, 0);
         collectFolderChoices(result, "home", copy, sourceController, 0);
         if (result.isEmpty()) {
-            result.add(CtxEntry.action("无可选文件夹", () -> {
+            result.add(CtxEntry.action(t("informationera.fe.no_folder"), () -> {
             }));
         }
         return result;
@@ -1394,7 +1502,7 @@ public final class FileExplorerController {
         if (depth > 0) {
             String label = (depth > 1 ? "— ".repeat(depth - 1) : "") + folder.name;
             out.add(CtxEntry.action(label, () -> {
-                sourceController.moveOrCopy(rightDragSourceKey, rightDragEntry, key, copy);
+                sourceController.moveOrCopy(rightDragSourceKey, rightDragEntries, key, copy);
                 if (sourceController != this) {
                     refreshAfterExternal();
                 }
@@ -1403,8 +1511,14 @@ public final class FileExplorerController {
         for (VirtualFileSystem.Entry entry : folder.entries) {
             if (entry.folder && entry.childKey != null) {
                 // 跳过拖拽源文件夹及其子树，避免移动到自身内部。
-                if (rightDragEntry != null && rightDragEntry.folder
-                        && rightDragEntry.childKey != null && entry.childKey.startsWith(rightDragEntry.childKey)) {
+                boolean selfOrChild = false;
+                for (VirtualFileSystem.Entry de : rightDragEntries) {
+                    if (de.folder && de.childKey != null && entry.childKey.startsWith(de.childKey)) {
+                        selfOrChild = true;
+                        break;
+                    }
+                }
+                if (selfOrChild) {
                     continue;
                 }
                 if (depth < 4) {
@@ -1415,11 +1529,11 @@ public final class FileExplorerController {
     }
 
     private void performRightDrop(boolean copy, FileExplorerController sourceController) {
-        if (rightDragEntry == null || rightDragSourceKey == null || rightDropTargetKey == null) {
-            setStatus("无法放置到此位置");
+        if (rightDragEntries.isEmpty() || rightDragSourceKey == null || rightDropTargetKey == null) {
+            setStatus(t("informationera.fe.status_drop_invalid"));
             return;
         }
-        sourceController.moveOrCopy(rightDragSourceKey, rightDragEntry, rightDropTargetKey, copy);
+        sourceController.moveOrCopy(rightDragSourceKey, rightDragEntries, rightDropTargetKey, copy);
         if (sourceController != this) {
             refreshAfterExternal();
         }
@@ -1453,31 +1567,28 @@ public final class FileExplorerController {
         }
     }
 
-    private record ClipItem(String sourceFolderKey, VirtualFileSystem.Entry entry) {
-    }
-
     private void showWindowContextMenu(double x, double y) {
         List<CtxEntry> entries = new ArrayList<>();
-        entries.add(CtxEntry.action("新建标签页", this::newTab));
-        entries.add(CtxEntry.action("最大化", this::toggleMaximize));
+        entries.add(CtxEntry.action(t("informationera.fe.new_tab"), this::newTab));
+        entries.add(CtxEntry.action(t("informationera.fe.maximize"), this::toggleMaximize));
         entries.add(CtxEntry.separator());
-        entries.add(CtxEntry.actionDanger("关闭窗口", this::closeWindow));
+        entries.add(CtxEntry.actionDanger(t("informationera.fe.close_window"), this::closeWindow));
         openContextMenu(x, y, entries);
     }
 
     private void showContentContextMenu(double x, double y) {
         List<CtxEntry> entries = new ArrayList<>();
-        entries.add(CtxEntry.action("刷新", this::renderContent));
-        entries.add(CtxEntry.action("新建文件夹", this::createFolder));
+        entries.add(CtxEntry.action(t("informationera.fe.refresh"), this::renderContent));
+        entries.add(CtxEntry.action(t("informationera.fe.new_folder"), this::createFolder));
         entries.add(CtxEntry.separator());
-        entries.add(CtxEntry.action("粘贴", this::paste));
-        entries.add(CtxEntry.action("撤销", this::undo));
-        entries.add(CtxEntry.action("重做", this::redo));
+        entries.add(CtxEntry.action(t("informationera.fe.paste"), this::paste));
+        entries.add(CtxEntry.action(t("informationera.fe.undo"), this::undo));
+        entries.add(CtxEntry.action(t("informationera.fe.redo"), this::redo));
         entries.add(CtxEntry.separator());
-        entries.add(CtxEntry.action("全选", this::selectAll));
-        entries.add(CtxEntry.action("反向选择", this::invertSelection));
+        entries.add(CtxEntry.action(t("informationera.fe.select_all"), this::selectAll));
+        entries.add(CtxEntry.action(t("informationera.fe.invert_selection"), this::invertSelection));
         entries.add(CtxEntry.separator());
-        entries.add(CtxEntry.action("属性", () -> setStatus(pathText(currentKey))));
+        entries.add(CtxEntry.action(t("informationera.fe.properties"), () -> setStatus(pathText(currentKey))));
         openContextMenu(x, y, entries);
     }
 
@@ -1492,76 +1603,91 @@ public final class FileExplorerController {
             updateStatusBar();
         }
         List<CtxEntry> entries = new ArrayList<>();
-        entries.add(CtxEntry.action("打开", () -> openEntry(entry)));
-        entries.add(CtxEntry.submenu("打开方式", List.of(
-                CtxEntry.action("记事本", () -> setStatus("已用记事本打开：" + entry.name)),
-                CtxEntry.action("默认应用", () -> openEntry(entry)))));
-        entries.add(CtxEntry.action("重命名", () -> beginRename(item, entry)));
+        entries.add(CtxEntry.action(t("informationera.fe.open"), () -> openEntry(entry)));
+        entries.add(CtxEntry.submenu(t("informationera.fe.open_with"), List.of(
+                CtxEntry.action(t("informationera.fe.notepad"), () -> setStatus(t("informationera.fe.status_opened_notepad", entry.name))),
+                CtxEntry.action(t("informationera.fe.default_app"), () -> openEntry(entry)))));
+        entries.add(CtxEntry.action(t("informationera.fe.rename"), () -> beginRename(item, entry)));
         entries.add(CtxEntry.separator());
-        entries.add(CtxEntry.action("剪切", this::cut));
-        entries.add(CtxEntry.action("复制", this::copy));
-        entries.add(CtxEntry.action("复制路径", () -> copyPath(entry)));
-        entries.add(CtxEntry.action("创建快捷方式", () -> createShortcut(entry)));
+        entries.add(CtxEntry.action(t("informationera.fe.cut"), this::cut));
+        entries.add(CtxEntry.action(t("informationera.fe.copy"), this::copy));
+        entries.add(CtxEntry.action(t("informationera.fe.copy_path"), () -> copyPath(entry)));
+        entries.add(CtxEntry.action(t("informationera.fe.create_shortcut"), () -> createShortcut(entry)));
+        if ("快捷方式".equals(entry.type) && entry.shortcutTargetKey != null) {
+            entries.add(CtxEntry.action(t("informationera.fe.open_location"), () -> openEntry(entry)));
+        }
         if (entry.folder && entry.childKey != null) {
             String key = entry.childKey;
-            entries.add(CtxEntry.action(pinned.contains(key) ? "从快速访问取消固定" : "固定到快速访问", () -> togglePin(key)));
+            entries.add(CtxEntry.action(pinned.contains(key)
+                    ? t("informationera.fe.unpin") : t("informationera.fe.pin"), () -> togglePin(key)));
         }
-        entries.add(CtxEntry.submenu("发送到", List.of(
-                CtxEntry.action("桌面", () -> sendTo("desktop", entry)),
-                CtxEntry.action("文档", () -> sendTo("documents", entry)),
-                CtxEntry.action("下载", () -> sendTo("downloads", entry)))));
-        entries.add(CtxEntry.actionDanger("删除", this::delete));
+        entries.add(CtxEntry.submenu(t("informationera.fe.send_to"), List.of(
+                CtxEntry.action(t("informationera.fe.desktop"), () -> sendTo("desktop", entry)),
+                CtxEntry.action(t("informationera.fe.documents"), () -> sendTo("documents", entry)),
+                CtxEntry.action(t("informationera.fe.downloads"), () -> sendTo("downloads", entry)))));
+        entries.add(CtxEntry.actionDanger(t("informationera.fe.delete"), this::delete));
         entries.add(CtxEntry.separator());
-        entries.add(CtxEntry.action("属性", () -> setStatus(entry.name + " —— " + entry.type + "，" + (entry.folder ? "文件夹" : formatSize(entry.size)))));
+        entries.add(CtxEntry.action(t("informationera.fe.properties"), () -> setStatus(entry.name + " — " + entry.type + "，" + (entry.folder ? t("informationera.fe.folder") : formatSize(entry.size)))));
         openContextMenu(x, y, entries);
     }
 
     private void showNewMenu(double x, double y) {
         List<CtxEntry> entries = new ArrayList<>();
-        entries.add(CtxEntry.header("新建"));
-        entries.add(CtxEntry.action("新建文件夹", this::createFolder));
+        entries.add(CtxEntry.header(t("informationera.fe.new")));
+        entries.add(CtxEntry.action(t("informationera.fe.new_folder"), this::createFolder));
         openContextMenu(x, y, entries);
     }
 
     private void showSortMenu(double x, double y) {
         List<CtxEntry> entries = new ArrayList<>();
-        entries.add(CtxEntry.actionChecked("名称", "name".equals(sortField), () -> setSort("name")));
-        entries.add(CtxEntry.actionChecked("修改日期", "modified".equals(sortField), () -> setSort("modified")));
-        entries.add(CtxEntry.actionChecked("类型", "type".equals(sortField), () -> setSort("type")));
-        entries.add(CtxEntry.actionChecked("大小", "size".equals(sortField), () -> setSort("size")));
+        entries.add(CtxEntry.actionChecked(t("informationera.fe.name"), "name".equals(sortField), () -> setSort("name")));
+        entries.add(CtxEntry.actionChecked(t("informationera.fe.modified"), "modified".equals(sortField), () -> setSort("modified")));
+        entries.add(CtxEntry.actionChecked(t("informationera.fe.created"), "created".equals(sortField), () -> setSort("created")));
+        entries.add(CtxEntry.actionChecked(t("informationera.fe.type"), "type".equals(sortField), () -> setSort("type")));
+        entries.add(CtxEntry.actionChecked(t("informationera.fe.size"), "size".equals(sortField), () -> setSort("size")));
+        entries.add(CtxEntry.actionChecked(t("informationera.fe.author"), "author".equals(sortField), () -> setSort("author")));
         entries.add(CtxEntry.separator());
-        entries.add(CtxEntry.actionChecked("升序", sortAsc, () -> setSortAscending(true)));
-        entries.add(CtxEntry.actionChecked("降序", !sortAsc, () -> setSortAscending(false)));
+        entries.add(CtxEntry.actionChecked(t("informationera.fe.asc"), sortAsc, () -> setSortAscending(true)));
+        entries.add(CtxEntry.actionChecked(t("informationera.fe.desc"), !sortAsc, () -> setSortAscending(false)));
         entries.add(CtxEntry.separator());
-        entries.add(CtxEntry.submenu("分组依据", List.of(
-                CtxEntry.actionChecked("无", groupBy == null, () -> setGroupBy(null)),
-                CtxEntry.actionChecked("名称", "name".equals(groupBy), () -> setGroupBy("name")),
-                CtxEntry.actionChecked("修改日期", "modified".equals(groupBy), () -> setGroupBy("modified")),
-                CtxEntry.actionChecked("类型", "type".equals(groupBy), () -> setGroupBy("type")),
-                CtxEntry.actionChecked("大小", "size".equals(groupBy), () -> setGroupBy("size")))));
+        entries.add(CtxEntry.actionChecked(t("informationera.fe.folders_first"), foldersFirst, this::toggleFoldersFirst));
+        entries.add(CtxEntry.separator());
+        entries.add(CtxEntry.submenu(t("informationera.fe.group_by"), List.of(
+                CtxEntry.actionChecked(t("informationera.fe.none"), groupBy == null, () -> setGroupBy(null)),
+                CtxEntry.actionChecked(t("informationera.fe.name"), "name".equals(groupBy), () -> setGroupBy("name")),
+                CtxEntry.actionChecked(t("informationera.fe.modified"), "modified".equals(groupBy), () -> setGroupBy("modified")),
+                CtxEntry.actionChecked(t("informationera.fe.created"), "created".equals(groupBy), () -> setGroupBy("created")),
+                CtxEntry.actionChecked(t("informationera.fe.type"), "type".equals(groupBy), () -> setGroupBy("type")),
+                CtxEntry.actionChecked(t("informationera.fe.size"), "size".equals(groupBy), () -> setGroupBy("size")),
+                CtxEntry.actionChecked(t("informationera.fe.author"), "author".equals(groupBy), () -> setGroupBy("author")))));
         openContextMenu(x, y, entries);
+    }
+
+    private void toggleFoldersFirst() {
+        foldersFirst = !foldersFirst;
+        renderContent();
     }
 
     private void showLayoutMenu(double x, double y) {
         List<CtxEntry> entries = new ArrayList<>();
-        entries.add(CtxEntry.actionChecked("超大图标", "xlarge".equals(viewMode), () -> setViewMode("xlarge")));
-        entries.add(CtxEntry.actionChecked("大图标", "large".equals(viewMode), () -> setViewMode("large")));
-        entries.add(CtxEntry.actionChecked("中等图标", "medium".equals(viewMode), () -> setViewMode("medium")));
-        entries.add(CtxEntry.actionChecked("小图标", "small".equals(viewMode), () -> setViewMode("small")));
+        entries.add(CtxEntry.actionChecked(t("informationera.fe.xlarge"), "xlarge".equals(viewMode), () -> setViewMode("xlarge")));
+        entries.add(CtxEntry.actionChecked(t("informationera.fe.large"), "large".equals(viewMode), () -> setViewMode("large")));
+        entries.add(CtxEntry.actionChecked(t("informationera.fe.medium"), "medium".equals(viewMode), () -> setViewMode("medium")));
+        entries.add(CtxEntry.actionChecked(t("informationera.fe.small"), "small".equals(viewMode), () -> setViewMode("small")));
         entries.add(CtxEntry.separator());
-        entries.add(CtxEntry.actionChecked("列表", "list".equals(viewMode), () -> setViewMode("list")));
-        entries.add(CtxEntry.actionChecked("详细信息", "details".equals(viewMode), () -> setViewMode("details")));
-        entries.add(CtxEntry.actionChecked("内容", "content".equals(viewMode), () -> setViewMode("content")));
-        entries.add(CtxEntry.actionChecked("平铺", "tiles".equals(viewMode), () -> setViewMode("tiles")));
+        entries.add(CtxEntry.actionChecked(t("informationera.fe.list"), "list".equals(viewMode), () -> setViewMode("list")));
+        entries.add(CtxEntry.actionChecked(t("informationera.fe.details"), "details".equals(viewMode), () -> setViewMode("details")));
+        entries.add(CtxEntry.actionChecked(t("informationera.fe.content"), "content".equals(viewMode), () -> setViewMode("content")));
+        entries.add(CtxEntry.actionChecked(t("informationera.fe.tiles"), "tiles".equals(viewMode), () -> setViewMode("tiles")));
         entries.add(CtxEntry.separator());
-        entries.add(CtxEntry.actionChecked("紧凑视图", compact, this::toggleCompact));
+        entries.add(CtxEntry.actionChecked(t("informationera.fe.compact"), compact, this::toggleCompact));
         entries.add(CtxEntry.separator());
-        entries.add(CtxEntry.actionChecked("导航窗格", showNav, this::toggleNavPane));
-        entries.add(CtxEntry.actionChecked("预览窗格", previewOpen, this::togglePreview));
-        entries.add(CtxEntry.actionChecked("详细信息窗格", detailsPaneOpen, this::toggleDetailsPane));
+        entries.add(CtxEntry.actionChecked(t("informationera.fe.nav_pane"), showNav, this::toggleNavPane));
+        entries.add(CtxEntry.actionChecked(t("informationera.fe.preview_pane"), previewOpen, this::togglePreview));
+        entries.add(CtxEntry.actionChecked(t("informationera.fe.details_pane"), detailsPaneOpen, this::toggleDetailsPane));
         entries.add(CtxEntry.separator());
-        entries.add(CtxEntry.actionChecked("复选框选择", checkboxes, this::toggleCheckboxes));
-        entries.add(CtxEntry.actionChecked("文件扩展名", showExtensions, this::toggleExtensions));
+        entries.add(CtxEntry.actionChecked(t("informationera.fe.checkboxes"), checkboxes, this::toggleCheckboxes));
+        entries.add(CtxEntry.actionChecked(t("informationera.fe.extensions"), showExtensions, this::toggleExtensions));
         openContextMenu(x, y, entries);
     }
 
@@ -1737,7 +1863,7 @@ public final class FileExplorerController {
             pushUndo(undo);
         }
         afterMutation();
-        setStatus(undo != null ? "已重命名" : "重命名无效（为空或重名）");
+        setStatus(undo != null ? t("informationera.fe.status_renamed") : t("informationera.fe.status_rename_invalid"));
     }
 
     private void cancelRename() {
@@ -1752,67 +1878,66 @@ public final class FileExplorerController {
 
     private void cut() {
         if (selected.isEmpty()) {
-            setStatus("未选中任何项目");
+            setStatus(t("informationera.fe.status_no_selection"));
             return;
         }
-        clipboard.clear();
+        ExplorerSession.clearClipboard();
         for (VirtualFileSystem.Entry entry : selected) {
-            clipboard.add(new ClipItem(currentKey, entry));
+            ExplorerSession.clipboard.add(new ExplorerSession.ClipItem(currentKey, entry));
         }
-        clipboardCut = true;
-        setStatus("已剪切 " + clipboard.size() + " 个项目");
+        ExplorerSession.clipboardCut = true;
+        setStatus(t("informationera.fe.status_cut", ExplorerSession.clipboard.size()));
         updateCommandButtons();
         updateSelectionVisuals();
     }
 
     private void copy() {
         if (selected.isEmpty()) {
-            setStatus("未选中任何项目");
+            setStatus(t("informationera.fe.status_no_selection"));
             return;
         }
-        clipboard.clear();
+        ExplorerSession.clearClipboard();
         for (VirtualFileSystem.Entry entry : selected) {
-            clipboard.add(new ClipItem(null, entry));
+            ExplorerSession.clipboard.add(new ExplorerSession.ClipItem(null, entry));
         }
-        clipboardCut = false;
-        setStatus("已复制 " + clipboard.size() + " 个项目");
+        ExplorerSession.clipboardCut = false;
+        setStatus(t("informationera.fe.status_copied", ExplorerSession.clipboard.size()));
         updateCommandButtons();
     }
 
     private void paste() {
-        if (clipboard.isEmpty()) {
-            setStatus("剪贴板为空");
+        if (ExplorerSession.clipboard.isEmpty()) {
+            setStatus(t("informationera.fe.status_clipboard_empty"));
             return;
         }
         List<Runnable> undos = new ArrayList<>();
         int count = 0;
-        if (clipboardCut) {
-            for (ClipItem item : new ArrayList<>(clipboard)) {
+        if (ExplorerSession.clipboardCut) {
+            for (ExplorerSession.ClipItem item : new ArrayList<>(ExplorerSession.clipboard)) {
                 if (item.sourceFolderKey() != null && !item.sourceFolderKey().equals(currentKey)) {
                     undos.add(fs.move(item.sourceFolderKey(), currentKey, item.entry()));
                     count++;
                 }
             }
-            clipboard.clear();
-            clipboardCut = false;
+            ExplorerSession.clearClipboard();
         } else {
-            for (ClipItem item : clipboard) {
+            for (ExplorerSession.ClipItem item : ExplorerSession.clipboard) {
                 undos.add(fs.duplicateInto(currentKey, item.entry()));
                 count++;
             }
         }
         if (count == 0) {
-            setStatus("无法粘贴到此位置");
+            setStatus(t("informationera.fe.status_cannot_paste"));
             return;
         }
         pushUndo(() -> undos.forEach(Runnable::run));
         afterMutation();
-        setStatus("已粘贴 " + count + " 个项目");
+        setStatus(t("informationera.fe.status_pasted", count));
     }
 
     private void delete() {
         if (selected.isEmpty()) {
-            setStatus("未选中任何项目");
+            setStatus(t("informationera.fe.status_no_selection"));
             return;
         }
         List<Runnable> undos = new ArrayList<>();
@@ -1823,42 +1948,44 @@ public final class FileExplorerController {
         }
         pushUndo(() -> undos.forEach(Runnable::run));
         afterMutation();
-        setStatus("已删除 " + count + " 个项目");
+        setStatus(t("informationera.fe.status_deleted", count));
     }
 
     private void createFolder() {
-        pushUndo(fs.createFolder(currentKey, "新建文件夹"));
+        pushUndo(fs.createFolder(currentKey, t("informationera.fe.new_folder")));
         afterMutation();
-        setStatus("已创建文件夹");
+        setStatus(t("informationera.fe.status_created_folder"));
     }
 
     private void undo() {
-        if (undoStack.isEmpty()) {
-            setStatus("没有可撤销的操作");
+        if (ExplorerSession.undoStack.isEmpty()) {
+            setStatus(t("informationera.fe.status_undo_none"));
             return;
         }
-        Runnable action = undoStack.pop();
+        Runnable action = ExplorerSession.undoStack.pop();
         action.run();
-        redoStack.push(action);
+        ExplorerSession.redoStack.push(action);
         afterMutation();
-        setStatus("已撤销");
+        FileExplorerWindow.refreshAll();
+        setStatus(t("informationera.fe.status_undone"));
     }
 
     private void redo() {
-        if (redoStack.isEmpty()) {
-            setStatus("没有可重做的操作");
+        if (ExplorerSession.redoStack.isEmpty()) {
+            setStatus(t("informationera.fe.status_redo_none"));
             return;
         }
-        Runnable action = redoStack.pop();
+        Runnable action = ExplorerSession.redoStack.pop();
         action.run();
-        undoStack.push(action);
+        ExplorerSession.undoStack.push(action);
         afterMutation();
-        setStatus("已重做");
+        FileExplorerWindow.refreshAll();
+        setStatus(t("informationera.fe.status_redone"));
     }
 
     private void pushUndo(Runnable undo) {
-        undoStack.push(undo);
-        redoStack.clear();
+        ExplorerSession.undoStack.push(undo);
+        ExplorerSession.redoStack.clear();
     }
 
     private void afterMutation() {
@@ -1998,14 +2125,53 @@ public final class FileExplorerController {
         return null;
     }
 
+    /** Alt+Enter：显示当前选中项属性。 */
+    private void showProperties() {
+        if (!selected.isEmpty()) {
+            VirtualFileSystem.Entry entry = selected.iterator().next();
+            setStatus(entry.name + " — " + entry.type + "，" + (entry.folder ? t("informationera.fe.folder") : formatSize(entry.size)));
+        } else if (!renderedEntryList.isEmpty()) {
+            VirtualFileSystem.Entry entry = renderedEntryList.get(0);
+            setStatus(entry.name + " — " + entry.type + "，" + (entry.folder ? t("informationera.fe.folder") : formatSize(entry.size)));
+        } else {
+            setStatus(pathText(currentKey));
+        }
+    }
+
+    /** Shift+F10：在当前位置打开上下文菜单（简化：对首个选中项，否则内容区空白菜单）。 */
+    private void showContextMenuAtCurrent() {
+        if (!selected.isEmpty()) {
+            VirtualFileSystem.Entry entry = selected.iterator().next();
+            int index = indexOfEntry(entry);
+            Element item = index >= 0 ? findItemByIndex(index) : null;
+            if (item != null) {
+                Element.DOMRect rect = item.getBoundingClientRect();
+                if (rect != null) {
+                    showItemContextMenu(item, entry, rect.left + 8, rect.top + 8);
+                    return;
+                }
+            }
+        }
+        Element content = document.getElementById("fe-content");
+        Element.DOMRect rect = content != null ? content.getBoundingClientRect() : null;
+        if (rect != null) {
+            showContentContextMenu(rect.left + 40, rect.top + 40);
+        }
+    }
+
     private void openEntry(VirtualFileSystem.Entry entry) {
+        // 快捷方式：跳转到其目标（文件夹则进入，文件则进入所在文件夹）。
+        if (entry.shortcutTargetKey != null && fs.folder(entry.shortcutTargetKey) != null) {
+            navigateTo(entry.shortcutTargetKey);
+            return;
+        }
         if (entry.childKey != null && fs.folder(entry.childKey) != null) {
             // 文件夹或指向文件夹的快捷方式。
             navigateTo(entry.childKey);
         } else if (entry.folder) {
-            setStatus("无法打开文件夹：" + entry.name);
+            setStatus(t("informationera.fe.status_cannot_open_folder", entry.name));
         } else {
-            setStatus("无法打开虚拟文件：" + entry.name);
+            setStatus(t("informationera.fe.status_cannot_open_file", entry.name));
         }
     }
 
@@ -2125,22 +2291,22 @@ public final class FileExplorerController {
             VirtualFileSystem.Entry entry = selected.iterator().next();
             StringBuilder sb = new StringBuilder();
             sb.append("<div class=\"fe-details-name\">").append(escape(entry.name)).append("</div>");
-            sb.append("<div class=\"fe-details-line\">类型：").append(escape(entry.type)).append("</div>");
+            sb.append("<div class=\"fe-details-line\">").append(t("informationera.fe.detail_type", escape(entry.type))).append("</div>");
             if (entry.folder) {
-                sb.append("<div class=\"fe-details-line\">文件夹</div>");
-                sb.append("<div class=\"fe-details-line\">包含：").append(childCount(entry.childKey)).append(" 个项目</div>");
+                sb.append("<div class=\"fe-details-line\">").append(t("informationera.fe.folder")).append("</div>");
+                sb.append("<div class=\"fe-details-line\">").append(t("informationera.fe.detail_contains", childCount(entry.childKey))).append("</div>");
             } else {
-                sb.append("<div class=\"fe-details-line\">大小：").append(formatSize(entry.size)).append("</div>");
-                sb.append("<div class=\"fe-details-line\">字节数：").append(entry.size).append(" 字节</div>");
+                sb.append("<div class=\"fe-details-line\">").append(t("informationera.fe.detail_size", formatSize(entry.size))).append("</div>");
+                sb.append("<div class=\"fe-details-line\">").append(t("informationera.fe.detail_bytes", entry.size)).append("</div>");
             }
-            sb.append("<div class=\"fe-details-line\">修改日期：").append(escape(entry.modified)).append("</div>");
-            sb.append("<div class=\"fe-details-line\">位置：").append(escape(pathText(currentKey))).append("</div>");
-            sb.append("<div class=\"fe-details-line\">属性：只读</div>");
+            sb.append("<div class=\"fe-details-line\">").append(t("informationera.fe.detail_modified", escape(entry.modified))).append("</div>");
+            sb.append("<div class=\"fe-details-line\">").append(t("informationera.fe.detail_location", escape(pathText(currentKey)))).append("</div>");
+            sb.append("<div class=\"fe-details-line\">").append(t("informationera.fe.detail_readonly")).append("</div>");
             pane.setInnerHTML(sb.toString());
         } else if (selected.size() > 1) {
-            pane.setInnerHTML("<div class=\"fe-details-empty\">已选择 " + selected.size() + " 个项目</div>");
+            pane.setInnerHTML("<div class=\"fe-details-empty\">" + t("informationera.fe.detail_selected", selected.size()) + "</div>");
         } else {
-            pane.setInnerHTML("<div class=\"fe-details-empty\">未选择任何项目</div>");
+            pane.setInnerHTML("<div class=\"fe-details-empty\">" + t("informationera.fe.detail_none") + "</div>");
         }
     }
 
@@ -2184,9 +2350,9 @@ public final class FileExplorerController {
         }
         StringBuilder toolbar = new StringBuilder();
         toolbar.append("<div class=\"fe-preview-toolbar\">");
-        toolbar.append(previewSizeButton("小", 48));
-        toolbar.append(previewSizeButton("中", 64));
-        toolbar.append(previewSizeButton("大", 128));
+        toolbar.append(previewSizeButton(t("informationera.fe.small"), 48));
+        toolbar.append(previewSizeButton(t("informationera.fe.medium"), 64));
+        toolbar.append(previewSizeButton(t("informationera.fe.large"), 128));
         toolbar.append("</div>");
 
         if (selected.size() == 1) {
@@ -2195,18 +2361,18 @@ public final class FileExplorerController {
             sb.append(toolbar);
             sb.append("<div class=\"fe-preview-icon\">").append(iconFor(entry, previewSize)).append("</div>");
             sb.append("<div class=\"fe-preview-name\">").append(escape(entry.name)).append("</div>");
-            sb.append("<div class=\"fe-preview-line\">类型：").append(escape(entry.type)).append("</div>");
+            sb.append("<div class=\"fe-preview-line\">").append(t("informationera.fe.detail_type", escape(entry.type))).append("</div>");
             if (entry.folder) {
-                sb.append("<div class=\"fe-preview-line\">文件夹</div>");
+                sb.append("<div class=\"fe-preview-line\">").append(t("informationera.fe.folder")).append("</div>");
             } else {
-                sb.append("<div class=\"fe-preview-line\">大小：").append(formatSize(entry.size)).append("</div>");
+                sb.append("<div class=\"fe-preview-line\">").append(t("informationera.fe.detail_size", formatSize(entry.size))).append("</div>");
             }
-            sb.append("<div class=\"fe-preview-line\">修改：").append(escape(entry.modified)).append("</div>");
+            sb.append("<div class=\"fe-preview-line\">").append(t("informationera.fe.detail_modified_short", escape(entry.modified))).append("</div>");
             pane.setInnerHTML(sb.toString());
         } else if (selected.size() > 1) {
-            pane.setInnerHTML(toolbar.toString() + "<div class=\"fe-preview-empty\">已选择 " + selected.size() + " 个项目</div>");
+            pane.setInnerHTML(toolbar.toString() + "<div class=\"fe-preview-empty\">" + t("informationera.fe.detail_selected", selected.size()) + "</div>");
         } else {
-            pane.setInnerHTML(toolbar.toString() + "<div class=\"fe-preview-empty\">未选择任何项目</div>");
+            pane.setInnerHTML(toolbar.toString() + "<div class=\"fe-preview-empty\">" + t("informationera.fe.detail_none") + "</div>");
         }
         bindPreviewSizeButtons();
     }
@@ -2235,7 +2401,7 @@ public final class FileExplorerController {
 
     private void navigateTo(String key) {
         if (fs.folder(key) == null) {
-            setStatus("路径不存在：" + key);
+            setStatus(t("informationera.fe.status_path_not_found", key));
             return;
         }
         backStack.push(currentKey);
@@ -2291,7 +2457,7 @@ public final class FileExplorerController {
         renderBreadcrumb();
         updateNavButtons();
         VirtualFileSystem.Folder folder = fs.folder(currentKey);
-        tabs.get(activeTab).title = folder != null ? folder.name : "文件资源管理器";
+        tabs.get(activeTab).title = folder != null ? folder.name : t("informationera.fe.title");
         renderTabs();
         setStatus("");
     }
@@ -2340,10 +2506,28 @@ public final class FileExplorerController {
             return;
         }
         StringBuilder sb = new StringBuilder();
-        if (!pinned.isEmpty()) {
-            sb.append("<div class=\"fe-nav-title\">快速访问</div>");
-            for (String key : pinned) {
-                renderPinnedNode(sb, key);
+        // 快速访问：固定 + 最近使用。
+        List<String> recent = FileExplorerWindow.getRecentPaths();
+        boolean hasRecent = !recent.isEmpty();
+        if (!pinned.isEmpty() || hasRecent) {
+            sb.append("<div class=\"fe-nav-title\">").append(t("informationera.fe.quick_access")).append("</div>");
+            if (!pinned.isEmpty()) {
+                for (String key : pinned) {
+                    renderPinnedNode(sb, key);
+                }
+            }
+            if (hasRecent) {
+                sb.append("<div class=\"fe-nav-title fe-nav-subtitle\">").append(t("informationera.fe.recent_use")).append("</div>");
+                int shown = 0;
+                for (String key : recent) {
+                    if (pinned.contains(key)) {
+                        continue;
+                    }
+                    renderPinnedNode(sb, key);
+                    if (++shown >= 8) {
+                        break;
+                    }
+                }
             }
         }
         for (String root : SIDEBAR_ROOTS) {
@@ -2454,17 +2638,31 @@ public final class FileExplorerController {
         if ("small".equals(viewMode) || "medium".equals(viewMode) || "large".equals(viewMode) || "xlarge".equals(viewMode)) {
             content.getClassList().add("fe-view-" + viewMode);
         }
+        List<VirtualFileSystem.Entry> entries = topLevelEntries();
         renderedEntryList.clear();
+        renderedEntryList.addAll(entries);
         lastClickedIndex = -1;
-        if (topLevelEntries().isEmpty()) {
-            content.setInnerHTML("<div class=\"fe-empty\">此文件夹为空</div>");
+
+        if (entries.isEmpty()) {
+            if (!searchQuery.trim().isEmpty()) {
+                content.setInnerHTML("<div class=\"fe-empty\">" + t("informationera.fe.no_match")
+                        + "<button class=\"fe-empty-search-btn\" id=\"fe-subfolder-search\">" + t("informationera.fe.search_subfolders") + "</button></div>");
+                Element btn = content.querySelector("#fe-subfolder-search");
+                if (btn != null) {
+                    btn.addEventListener("click", e -> searchSubfolders());
+                }
+            } else {
+                content.setInnerHTML("<div class=\"fe-empty\">" + t("informationera.fe.empty_folder") + "</div>");
+            }
+        } else if (isLinearView() && entries.size() > 200) {
+            renderContentVirtual(entries);
         } else {
             content.setInnerHTML(switch (viewMode) {
-                case "details" -> buildTable();
-                case "content" -> buildContent();
-                case "list" -> buildList();
-                case "tiles" -> buildTiles();
-                default -> buildGrid();
+                case "details" -> buildTable(entries);
+                case "content" -> buildContent(entries);
+                case "list" -> buildList(entries);
+                case "tiles" -> buildTiles(entries);
+                default -> buildGrid(entries);
             });
         }
         bindItemListeners();
@@ -2475,6 +2673,207 @@ public final class FileExplorerController {
         updateStatusViewButtons();
     }
 
+    private boolean isLinearView() {
+        return "details".equals(viewMode) || "list".equals(viewMode) || "content".equals(viewMode);
+    }
+
+    /** 线性视图窗口化渲染：只渲染可视窗口内的行，上下用 spacer 占位。 */
+    private void renderContentVirtual(List<VirtualFileSystem.Entry> entries) {
+        Element content = document.getElementById("fe-content");
+        if (content == null) {
+            return;
+        }
+        double scrollTop = content.getScrollTop();
+        Element.DOMRect rect = content.getBoundingClientRect();
+        double viewH = rect != null && rect.height > 0 ? rect.height : 600;
+        int total = entries.size();
+        int start = Math.max(0, (int) Math.floor(scrollTop / ROW_HEIGHT) - VIRTUAL_BUFFER);
+        int end = Math.min(total, (int) Math.ceil((scrollTop + viewH) / ROW_HEIGHT) + VIRTUAL_BUFFER);
+
+        StringBuilder sb = new StringBuilder();
+        boolean details = "details".equals(viewMode);
+        if (details) {
+            sb.append("<div class=\"fe-table fe-vtable\" style=\"").append(tableWidthStyle()).append("\">");
+            sb.append("<div class=\"fe-vthead\" style=\"").append(gridTemplateStyle()).append("\">");
+            for (int col = 0; col < COL_FIELDS.length; col++) {
+                if (columnVisible[col]) {
+                    sb.append(headerCell(columnLabels()[col], COL_FIELDS[col], col));
+                }
+            }
+            sb.append("</div>");
+        }
+        sb.append("<div class=\"fe-vbody\" style=\"height:").append(Math.round(total * ROW_HEIGHT))
+          .append("px;position:relative;\">");
+        if (start > 0) {
+            sb.append("<div style=\"height:").append(Math.round(start * ROW_HEIGHT)).append("px;\"></div>");
+        }
+        for (int i = start; i < end; i++) {
+            VirtualFileSystem.Entry entry = entries.get(i);
+            if (details) {
+                sb.append("<div class=\"fe-item fe-vrow\" data-id=\"e").append(i).append("\"")
+                  .append(" data-folder=\"").append(entry.folder ? "1" : "0").append("\"")
+                  .append(folderPathAttr(entry))
+                  .append(" style=\"").append(gridTemplateStyle()).append("\">");
+                for (int col = 0; col < COL_FIELDS.length; col++) {
+                    if (columnVisible[col]) {
+                        sb.append(cellDiv(entry, col, i));
+                    }
+                }
+                sb.append("</div>");
+            } else {
+                sb.append("<div class=\"fe-item fe-vrow fe-list-item\" data-id=\"e").append(i).append("\"")
+                  .append(" data-folder=\"").append(entry.folder ? "1" : "0").append("\"")
+                  .append(folderPathAttr(entry)).append(">");
+                if (checkboxes) {
+                    sb.append("<span class=\"fe-check\" data-id=\"e").append(i).append("\"></span>");
+                }
+                sb.append("<span class=\"fe-icon\">").append(iconFor(entry, 16)).append("</span>");
+                sb.append("<span class=\"fe-name-text\" data-name=\"1\">").append(escape(displayName(entry))).append("</span>");
+                sb.append("</div>");
+            }
+        }
+        sb.append("</div>");
+        if (details) {
+            sb.append("</div>");
+        }
+        content.setInnerHTML(sb.toString());
+    }
+
+    /** 虚拟滚动模式下的单元格（div 形式，对应 cellFor）。 */
+    private String cellDiv(VirtualFileSystem.Entry entry, int col, int index) {
+        switch (col) {
+            case 0 -> {
+                StringBuilder sb = new StringBuilder("<div class=\"fe-cell\">");
+                if (checkboxes) {
+                    sb.append("<span class=\"fe-check\" data-id=\"e").append(index).append("\"></span>");
+                }
+                sb.append(iconFor(entry, 16))
+                  .append("<span class=\"fe-name-text\" data-name=\"1\">").append(escape(displayName(entry))).append("</span>")
+                  .append("</div>");
+                return sb.toString();
+            }
+            case 1 -> {
+                return "<div class=\"fe-vcell\">" + escape(entry.modified) + "</div>";
+            }
+            case 2 -> {
+                return "<div class=\"fe-vcell\">" + escape(entry.type) + "</div>";
+            }
+            case 3 -> {
+                return "<div class=\"fe-vcell\">" + (entry.folder ? "" : formatSize(entry.size)) + "</div>";
+            }
+            case 4 -> {
+                return "<div class=\"fe-vcell\">" + escape(entry.created) + "</div>";
+            }
+            case 5 -> {
+                return "<div class=\"fe-vcell\">" + escape(entry.author) + "</div>";
+            }
+            default -> {
+                return "<div class=\"fe-vcell\"></div>";
+            }
+        }
+    }
+
+    private void onContentScroll() {
+        Element content = document.getElementById("fe-content");
+        if (content == null) {
+            return;
+        }
+        double newTop = content.getScrollTop();
+        if (Math.abs(newTop - scrollTop) > 1.0) {
+            scrollTop = newTop;
+            if (isLinearView()) {
+                List<VirtualFileSystem.Entry> entries = topLevelEntries();
+                if (entries.size() > 200) {
+                    renderContentVirtual(entries);
+                    bindItemListeners();
+                    bindTableHeaders();
+                    updateSelectionVisuals();
+                }
+            }
+        }
+    }
+
+    /** 通配符匹配：支持 *（任意串）和 ?（单字符），大小写不敏感。 */
+    private static boolean matchesQuery(String lowerName, String query) {
+        if (query.isEmpty()) {
+            return true;
+        }
+        if (query.indexOf('*') < 0 && query.indexOf('?') < 0) {
+            return lowerName.contains(query);
+        }
+        return wildcardMatch(lowerName, query);
+    }
+
+    private static boolean wildcardMatch(String text, String pattern) {
+        int ti = 0;
+        int pi = 0;
+        int star = -1;
+        int mark = -1;
+        while (ti < text.length()) {
+            if (pi < pattern.length() && (pattern.charAt(pi) == '?' || pattern.charAt(pi) == text.charAt(ti))) {
+                ti++;
+                pi++;
+            } else if (pi < pattern.length() && pattern.charAt(pi) == '*') {
+                star = pi;
+                mark = ti;
+                pi++;
+            } else if (star != -1) {
+                pi = star + 1;
+                mark++;
+                ti = mark;
+            } else {
+                return false;
+            }
+        }
+        while (pi < pattern.length() && pattern.charAt(pi) == '*') {
+            pi++;
+        }
+        return pi == pattern.length();
+    }
+
+    /** 递归收集当前文件夹子树内匹配 query 的文件（含所在文件夹 key）。 */
+    private void collectRecursiveMatches(String folderKey, String query, int depth,
+                                         List<VirtualFileSystem.Entry> files, List<String> fileFolders) {
+        if (depth > 12) {
+            return;
+        }
+        VirtualFileSystem.Folder folder = fs.folder(folderKey);
+        if (folder == null) {
+            return;
+        }
+        for (VirtualFileSystem.Entry entry : folder.entries) {
+            if (entry.folder && entry.childKey != null) {
+                collectRecursiveMatches(entry.childKey, query, depth + 1, files, fileFolders);
+            } else if (matchesQuery(entry.name.toLowerCase(), query)) {
+                files.add(entry);
+                fileFolders.add(folderKey);
+            }
+        }
+    }
+
+    /** 在子文件夹中搜索：若有匹配则导航到第一个匹配项所在文件夹并选中它。 */
+    private void searchSubfolders() {
+        String query = searchQuery == null ? "" : searchQuery.trim().toLowerCase();
+        if (query.isEmpty()) {
+            return;
+        }
+        List<VirtualFileSystem.Entry> files = new ArrayList<>();
+        List<String> fileFolders = new ArrayList<>();
+        collectRecursiveMatches(currentKey, query, 0, files, fileFolders);
+        if (files.isEmpty()) {
+            setStatus(t("informationera.fe.status_no_subfolder_match"));
+            return;
+        }
+        String targetKey = fileFolders.get(0);
+        VirtualFileSystem.Entry target = files.get(0);
+        navigateTo(targetKey);
+        selected.clear();
+        selected.add(target);
+        updateSelectionVisuals();
+        updateStatusBar();
+        setStatus(t("informationera.fe.status_subfolder_found", files.size()));
+    }
+
     private List<VirtualFileSystem.Entry> topLevelEntries() {
         List<VirtualFileSystem.Entry> entries = new ArrayList<>();
         VirtualFileSystem.Folder folder = fs.folder(currentKey);
@@ -2483,7 +2882,7 @@ public final class FileExplorerController {
         }
         String query = searchQuery == null ? "" : searchQuery.trim().toLowerCase();
         for (VirtualFileSystem.Entry entry : folder.entries) {
-            if (query.isEmpty() || entry.name.toLowerCase().contains(query)) {
+            if (query.isEmpty() || matchesQuery(entry.name.toLowerCase(), query)) {
                 entries.add(entry);
             }
         }
@@ -2502,12 +2901,12 @@ public final class FileExplorerController {
         return entries;
     }
 
-    /** 组内排序（文件夹优先 + 名称）。 */
+    /** 组内排序（文件夹优先可配置 + 自然排序名称）。 */
     private int compareEntries(VirtualFileSystem.Entry a, VirtualFileSystem.Entry b) {
-        if (a.folder != b.folder) {
+        if (foldersFirst && a.folder != b.folder) {
             return a.folder ? -1 : 1;
         }
-        return a.name.compareToIgnoreCase(b.name);
+        return VirtualFileSystem.naturalCompare(a.name, b.name);
     }
 
     private String displayName(VirtualFileSystem.Entry entry) {
@@ -2525,7 +2924,9 @@ public final class FileExplorerController {
         return switch (groupBy == null ? "" : groupBy) {
             case "name" -> entry.name.isEmpty() ? "" : String.valueOf(firstLetter(entry.name.charAt(0)));
             case "modified" -> modifiedGroup(entry.modified);
+            case "created" -> modifiedGroup(entry.created);
             case "type" -> entry.type;
+            case "author" -> entry.author == null ? "未知" : entry.author;
             case "size" -> entry.folder ? "文件夹" : sizeGroup(entry.size);
             default -> "";
         };
@@ -2603,38 +3004,38 @@ public final class FileExplorerController {
 
     private void sortEntries(List<VirtualFileSystem.Entry> entries) {
         entries.sort((a, b) -> {
-            if (a.folder != b.folder) {
-                return a.folder ? -1 : 1;
-            }
             int cmp;
-            if (a.folder) {
-                cmp = a.name.compareToIgnoreCase(b.name);
+            if (foldersFirst && a.folder != b.folder) {
+                cmp = a.folder ? -1 : 1;
+            } else if (a.folder && b.folder) {
+                cmp = VirtualFileSystem.naturalCompare(a.name, b.name);
             } else {
                 cmp = switch (sortField) {
                     case "modified" -> a.modified.compareTo(b.modified);
+                    case "created" -> a.created.compareTo(b.created);
                     case "type" -> a.type.compareToIgnoreCase(b.type);
+                    case "author" -> a.author.compareToIgnoreCase(b.author);
                     case "size" -> Long.compare(a.size, b.size);
-                    default -> a.name.compareToIgnoreCase(b.name);
+                    default -> VirtualFileSystem.naturalCompare(a.name, b.name);
                 };
             }
             if (cmp == 0) {
-                cmp = a.name.compareToIgnoreCase(b.name);
+                cmp = VirtualFileSystem.naturalCompare(a.name, b.name);
             }
             return sortAsc ? cmp : -cmp;
         });
     }
 
-    private String buildTable() {
+    private String buildTable(List<VirtualFileSystem.Entry> entries) {
         StringBuilder sb = new StringBuilder();
         sb.append("<table class=\"table fe-table\" style=\"").append(tableWidthStyle()).append("\">");
         sb.append("<thead><tr style=\"").append(gridTemplateStyle()).append("\">");
-        for (int col = 0; col < 4; col++) {
+        for (int col = 0; col < COL_FIELDS.length; col++) {
             if (columnVisible[col]) {
-                sb.append(headerCell(COL_LABELS[col], COL_FIELDS[col], col));
+                sb.append(headerCell(columnLabels()[col], COL_FIELDS[col], col));
             }
         }
         sb.append("</tr></thead><tbody>");
-        List<VirtualFileSystem.Entry> entries = topLevelEntries();
         if (groupBy != null && !groupBy.isEmpty()) {
             String currentGroup = null;
             boolean currentCollapsed = false;
@@ -2745,14 +3146,16 @@ public final class FileExplorerController {
     }
 
     private void renderTableRow(StringBuilder sb, VirtualFileSystem.Entry entry) {
-        int index = renderedEntryList.size();
-        renderedEntryList.add(entry);
+        int index = renderedEntryList.indexOf(entry);
+        if (index < 0) {
+            return;
+        }
 
         sb.append("<tr class=\"fe-item\" data-id=\"e").append(index).append("\"")
           .append(" data-folder=\"").append(entry.folder ? "1" : "0").append("\"")
           .append(folderPathAttr(entry))
           .append(" style=\"").append(gridTemplateStyle()).append("\">");
-        for (int col = 0; col < 4; col++) {
+        for (int col = 0; col < COL_FIELDS.length; col++) {
             if (columnVisible[col]) {
                 sb.append(cellFor(entry, col, index));
             }
@@ -2769,7 +3172,7 @@ public final class FileExplorerController {
                     sb.append("<span class=\"fe-check\" data-id=\"e").append(index).append("\"></span>");
                 }
                 sb.append(iconFor(entry, 16))
-                  .append("<span class=\"fe-name-text\">").append(escape(displayName(entry))).append("</span>")
+                  .append("<span class=\"fe-name-text\" data-name=\"1\">").append(escape(displayName(entry))).append("</span>")
                   .append("</div></td>");
                 return sb.toString();
             }
@@ -2782,6 +3185,12 @@ public final class FileExplorerController {
             case 3 -> {
                 return "<td>" + (entry.folder ? "" : formatSize(entry.size)) + "</td>";
             }
+            case 4 -> {
+                return "<td>" + escape(entry.created) + "</td>";
+            }
+            case 5 -> {
+                return "<td>" + escape(entry.author) + "</td>";
+            }
             default -> {
                 return "<td></td>";
             }
@@ -2791,7 +3200,7 @@ public final class FileExplorerController {
     private String gridTemplateStyle() {
         StringBuilder sb = new StringBuilder("grid-template-columns:");
         boolean first = true;
-        for (int col = 0; col < 4; col++) {
+        for (int col = 0; col < COL_FIELDS.length; col++) {
             if (!columnVisible[col]) {
                 continue;
             }
@@ -2807,7 +3216,7 @@ public final class FileExplorerController {
 
     private String tableWidthStyle() {
         double sum = 0;
-        for (int col = 0; col < 4; col++) {
+        for (int col = 0; col < COL_FIELDS.length; col++) {
             if (columnVisible[col]) {
                 sum += columnWidths.get(col);
             }
@@ -2827,7 +3236,7 @@ public final class FileExplorerController {
 
     private void toggleColumn(int col) {
         if (columnVisible[col] && visibleColumnCount() <= 1) {
-            setStatus("至少保留一列");
+            setStatus(t("informationera.fe.status_at_least_one_col"));
             return;
         }
         columnVisible[col] = !columnVisible[col];
@@ -2839,18 +3248,20 @@ public final class FileExplorerController {
         columnWidths.set(1, 160.0);
         columnWidths.set(2, 120.0);
         columnWidths.set(3, 100.0);
+        columnWidths.set(4, 140.0);
+        columnWidths.set(5, 100.0);
         renderContent();
     }
 
     private void showHeaderContextMenu(double x, double y) {
         List<CtxEntry> entries = new ArrayList<>();
-        for (int col = 0; col < 4; col++) {
+        for (int col = 0; col < COL_FIELDS.length; col++) {
             int c = col;
-            entries.add(CtxEntry.actionChecked(COL_LABELS[col], columnVisible[col], () -> toggleColumn(c)));
+            entries.add(CtxEntry.actionChecked(columnLabels()[col], columnVisible[col], () -> toggleColumn(c)));
         }
         entries.add(CtxEntry.separator());
-        entries.add(CtxEntry.action("全部列显示", this::showAllColumns));
-        entries.add(CtxEntry.action("重置列宽", this::resetColumnWidths));
+        entries.add(CtxEntry.action(t("informationera.fe.show_all_columns"), this::showAllColumns));
+        entries.add(CtxEntry.action(t("informationera.fe.reset_widths"), this::resetColumnWidths));
         openContextMenu(x, y, entries);
     }
 
@@ -2865,9 +3276,8 @@ public final class FileExplorerController {
      * 渲染条目列表。启用了分组时，每个分组是一个独立 section：分组头 + 组内条目容器，
      * 组内条目从各自的第一列重新排布；未分组时直接渲染到 itemsClass 容器。
      */
-    private void appendEntriesWithGroups(StringBuilder sb, String itemsClass,
+    private void appendEntriesWithGroups(StringBuilder sb, String itemsClass, List<VirtualFileSystem.Entry> entries,
                                          java.util.function.Consumer<VirtualFileSystem.Entry> renderer) {
-        List<VirtualFileSystem.Entry> entries = topLevelEntries();
         if (groupBy != null && !groupBy.isEmpty()) {
             java.util.Map<String, List<VirtualFileSystem.Entry>> groups = new java.util.LinkedHashMap<>();
             for (VirtualFileSystem.Entry entry : entries) {
@@ -2896,11 +3306,10 @@ public final class FileExplorerController {
         }
     }
 
-    private String buildGrid() {
+    private String buildGrid(List<VirtualFileSystem.Entry> entries) {
         StringBuilder sb = new StringBuilder();
-        appendEntriesWithGroups(sb, "fe-grid", entry -> {
-            int index = renderedEntryList.size();
-            renderedEntryList.add(entry);
+        appendEntriesWithGroups(sb, "fe-grid", entries, entry -> {
+            int index = renderedEntryList.indexOf(entry);
             sb.append("<div class=\"fe-item fe-grid-item\" data-id=\"e").append(index).append("\"")
               .append(" data-folder=\"").append(entry.folder ? "1" : "0").append("\"")
               .append(folderPathAttr(entry)).append(">");
@@ -2908,17 +3317,19 @@ public final class FileExplorerController {
                 sb.append("<span class=\"fe-check\" data-id=\"e").append(index).append("\"></span>");
             }
             sb.append("<div class=\"fe-icon\">").append(iconFor(entry, iconSize)).append("</div>");
-            sb.append("<div class=\"fe-name\">").append(escape(displayName(entry))).append("</div>");
+            sb.append("<div class=\"fe-name\" data-name=\"1\">").append(escape(displayName(entry))).append("</div>");
+            if ("本地磁盘".equals(entry.type)) {
+                sb.append(driveBar(entry));
+            }
             sb.append("</div>");
         });
         return sb.toString();
     }
 
-    private String buildTiles() {
+    private String buildTiles(List<VirtualFileSystem.Entry> entries) {
         StringBuilder sb = new StringBuilder();
-        appendEntriesWithGroups(sb, "fe-tiles", entry -> {
-            int index = renderedEntryList.size();
-            renderedEntryList.add(entry);
+        appendEntriesWithGroups(sb, "fe-tiles", entries, entry -> {
+            int index = renderedEntryList.indexOf(entry);
             sb.append("<div class=\"fe-item fe-tile-item\" data-id=\"e").append(index).append("\"")
               .append(" data-folder=\"").append(entry.folder ? "1" : "0").append("\"")
               .append(folderPathAttr(entry)).append(">");
@@ -2927,21 +3338,24 @@ public final class FileExplorerController {
             }
             sb.append("<div class=\"fe-icon\">").append(iconFor(entry, 48)).append("</div>");
             sb.append("<div class=\"fe-tile-meta\">");
-            sb.append("<div class=\"fe-tile-name\">").append(escape(displayName(entry))).append("</div>");
+            sb.append("<div class=\"fe-tile-name\" data-name=\"1\">").append(escape(displayName(entry))).append("</div>");
             sb.append("<div class=\"fe-tile-line\">").append(escape(entry.type)).append("</div>");
             sb.append("<div class=\"fe-tile-line\">").append(entry.folder ? "文件夹" : formatSize(entry.size)).append("</div>");
-            sb.append("<div class=\"fe-tile-line\">").append(escape(entry.modified)).append("</div>");
+            if ("本地磁盘".equals(entry.type)) {
+                sb.append(driveBar(entry));
+            } else {
+                sb.append("<div class=\"fe-tile-line\">").append(escape(entry.modified)).append("</div>");
+            }
             sb.append("</div></div>");
         });
         return sb.toString();
     }
 
     /** 列表视图：小图标 + 名称，多列紧凑排列，无表头。 */
-    private String buildList() {
+    private String buildList(List<VirtualFileSystem.Entry> entries) {
         StringBuilder sb = new StringBuilder();
-        appendEntriesWithGroups(sb, "fe-list", entry -> {
-            int index = renderedEntryList.size();
-            renderedEntryList.add(entry);
+        appendEntriesWithGroups(sb, "fe-list", entries, entry -> {
+            int index = renderedEntryList.indexOf(entry);
             sb.append("<div class=\"fe-item fe-list-item\" data-id=\"e").append(index).append("\"")
               .append(" data-folder=\"").append(entry.folder ? "1" : "0").append("\"")
               .append(folderPathAttr(entry)).append(">");
@@ -2949,18 +3363,17 @@ public final class FileExplorerController {
                 sb.append("<span class=\"fe-check\" data-id=\"e").append(index).append("\"></span>");
             }
             sb.append("<span class=\"fe-icon\">").append(iconFor(entry, 16)).append("</span>");
-            sb.append("<span class=\"fe-name-text\">").append(escape(displayName(entry))).append("</span>");
+            sb.append("<span class=\"fe-name-text\" data-name=\"1\">").append(escape(displayName(entry))).append("</span>");
             sb.append("</div>");
         });
         return sb.toString();
     }
 
     /** 内容视图：单列，每行小图标 + 名称 + 类型 + 大小 + 修改日期，无表头。 */
-    private String buildContent() {
+    private String buildContent(List<VirtualFileSystem.Entry> entries) {
         StringBuilder sb = new StringBuilder();
-        appendEntriesWithGroups(sb, "fe-content-list", entry -> {
-            int index = renderedEntryList.size();
-            renderedEntryList.add(entry);
+        appendEntriesWithGroups(sb, "fe-content-list", entries, entry -> {
+            int index = renderedEntryList.indexOf(entry);
             sb.append("<div class=\"fe-item fe-content-item\" data-id=\"e").append(index).append("\"")
               .append(" data-folder=\"").append(entry.folder ? "1" : "0").append("\"")
               .append(folderPathAttr(entry)).append(">");
@@ -2969,7 +3382,7 @@ public final class FileExplorerController {
             }
             sb.append("<span class=\"fe-icon\">").append(iconFor(entry, 16)).append("</span>");
             sb.append("<div class=\"fe-content-meta\">");
-            sb.append("<div class=\"fe-content-name\">").append(escape(displayName(entry))).append("</div>");
+            sb.append("<div class=\"fe-content-name\" data-name=\"1\">").append(escape(displayName(entry))).append("</div>");
             sb.append("<div class=\"fe-content-details\">")
               .append(escape(entry.type)).append(" · ")
               .append(entry.folder ? "文件夹" : formatSize(entry.size)).append(" · ")
@@ -3007,12 +3420,19 @@ public final class FileExplorerController {
                     }
                     // AUI 的 MouseEvent.button 使用 GLFW 按钮号：0=左键，1=右键，2=中键。
                     if (me.button == 0 || me.button == 1) {
-                        // 被拖动的文件进入单独选中状态（无论左右键）。
-                        selected.clear();
-                        selected.add(entry);
-                        updateSelectionVisuals();
-                        updateStatusBar();
-                        FileExplorerWindow.beginFileDrag(this, entry, currentKey, me.button == 1);
+                        boolean right = me.button == 1;
+                        // 若按下项已在选中集内，则拖拽整个选中集（多选拖拽）；否则仅拖拽当前项。
+                        List<VirtualFileSystem.Entry> dragList;
+                        if (selected.contains(entry)) {
+                            dragList = new ArrayList<>(selected);
+                        } else {
+                            selected.clear();
+                            selected.add(entry);
+                            dragList = new ArrayList<>(selected);
+                            updateSelectionVisuals();
+                            updateStatusBar();
+                        }
+                        FileExplorerWindow.beginFileDrag(this, dragList, currentKey, right);
                     }
                 }
             });
@@ -3058,24 +3478,28 @@ public final class FileExplorerController {
         boolean shift = event instanceof MouseEvent me && me.shiftKey;
         int clickCount = event instanceof MouseEvent me ? me.clickCount : 1;
 
-        // 双击：打开（Windows 行为），优先级高于慢双击重命名。
+        // 双击（系统合并，clickCount>=2）：打开（Windows 行为）。
         if (!ctrl && !shift && clickCount >= 2) {
-            lastRenameCandidate = null;
-            lastRenameCandidateTime = 0L;
             openEntry(entry);
             return;
         }
 
-        // 慢双击（间隔在阈值内的两次独立单击）进入重命名。
+        // 慢双击重命名：仅当点击已选中项的文件名标签时进入 label edit（Explorer 行为）。
+        // 两次单击间隔必须在 500ms 以上（否则会被系统合并为双击，走上面的打开逻辑）。
         long now = System.currentTimeMillis();
-        if (!ctrl && !shift && lastRenameCandidate == entry && now - lastRenameCandidateTime <= 800L) {
-            lastRenameCandidate = null;
-            lastRenameCandidateTime = 0L;
+        if (clickCount == 1 && !ctrl && !shift && selected.size() == 1
+                && selected.contains(entry) && isNameClick(event)
+                && lastClickEntry == entry && now - lastClickTime > 500L) {
             beginRename(item, entry);
             return;
         }
-        lastRenameCandidate = entry;
-        lastRenameCandidateTime = now;
+        if (clickCount == 1 && !ctrl && !shift) {
+            lastClickEntry = entry;
+            lastClickTime = now;
+        } else {
+            lastClickEntry = null;
+            lastClickTime = 0L;
+        }
 
         if (shift && selectionAnchor >= 0) {
             selected.clear();
@@ -3101,16 +3525,25 @@ public final class FileExplorerController {
         updateStatusBar();
     }
 
+    /** 判断点击是否落在条目文件名区域（带 data-name 标记的元素内）。 */
+    private boolean isNameClick(Event event) {
+        if (!(event instanceof MouseEvent me)) {
+            return false;
+        }
+        Element target = me.target instanceof Element ? (Element) me.target : null;
+        return target != null && target.closest("[data-name]") != null;
+    }
+
     private VirtualFileSystem.Entry entryFor(Element item) {
         int index = indexOf(item);
         return index >= 0 && index < renderedEntryList.size() ? renderedEntryList.get(index) : null;
     }
 
     private boolean isCut(VirtualFileSystem.Entry entry) {
-        if (!clipboardCut) {
+        if (!ExplorerSession.clipboardCut) {
             return false;
         }
-        for (ClipItem item : clipboard) {
+        for (ExplorerSession.ClipItem item : ExplorerSession.clipboard) {
             if (item.entry() == entry) {
                 return true;
             }
@@ -3182,9 +3615,9 @@ public final class FileExplorerController {
 
     private String metadataText(VirtualFileSystem.Entry entry) {
         return entry.name
-                + "\n类型：" + entry.type
-                + "\n" + (entry.folder ? "文件夹" : "大小：" + formatSize(entry.size))
-                + "\n修改：" + entry.modified;
+                + "\n" + t("informationera.fe.detail_type", entry.type)
+                + "\n" + (entry.folder ? t("informationera.fe.folder") : t("informationera.fe.detail_size", formatSize(entry.size)))
+                + "\n" + t("informationera.fe.detail_modified_short", entry.modified);
     }
 
     private void hideTooltip() {
@@ -3239,8 +3672,8 @@ public final class FileExplorerController {
     // ---------- 状态栏 / 按钮 ----------
 
     private void updateStatusBar() {
-        setText("fe-item-count", renderedEntryList.size() + " 个项目");
-        setText("fe-selection-count", selected.isEmpty() ? "" : "已选择 " + selected.size() + " 个项目" + selectedSizeText());
+        setText("fe-item-count", t("informationera.fe.status_items", renderedEntryList.size()));
+        setText("fe-selection-count", selected.isEmpty() ? "" : t("informationera.fe.status_selected", selected.size()) + selectedSizeText());
     }
 
     private void updateStatusViewButtons() {
@@ -3268,8 +3701,8 @@ public final class FileExplorerController {
             return;
         }
         VirtualFileSystem.Folder folder = fs.folder(currentKey);
-        String name = folder != null ? folder.name : "文件资源管理器";
-        search.setPlaceholder("在 " + name + " 中搜索");
+        String name = folder != null ? folder.name : t("informationera.fe.title");
+        search.setPlaceholder(t("informationera.fe.search_placeholder", name));
     }
 
     private String selectedSizeText() {
@@ -3310,7 +3743,7 @@ public final class FileExplorerController {
         setButtonEnabled("fe-cmd-copy", hasSelection);
         setButtonEnabled("fe-cmd-rename", hasSelection);
         setButtonEnabled("fe-cmd-delete", hasSelection);
-        setButtonEnabled("fe-cmd-paste", !clipboard.isEmpty());
+        setButtonEnabled("fe-cmd-paste", !ExplorerSession.clipboard.isEmpty());
     }
 
     private void setText(String id, String text) {
@@ -3335,27 +3768,26 @@ public final class FileExplorerController {
     }
 
     private void createShortcut(VirtualFileSystem.Entry entry) {
-        String targetKey = entry.childKey;
-        pushUndo(fs.createShortcut(currentKey, entry, targetKey));
+        pushUndo(fs.createShortcut(currentKey, currentKey, entry));
         afterMutation();
-        setStatus("已创建快捷方式：" + entry.name);
+        setStatus(t("informationera.fe.status_shortcut_created", entry.name));
     }
 
     private void copyPath(VirtualFileSystem.Entry entry) {
         String path = pathText(currentKey) + " > " + entry.name;
         Minecraft.getInstance().keyboardHandler.setClipboard(path);
-        setStatus("已复制路径：" + path);
+        setStatus(t("informationera.fe.status_path_copied", path));
     }
 
     private void sendTo(String targetKey, VirtualFileSystem.Entry entry) {
         VirtualFileSystem.Folder target = fs.folder(targetKey);
         if (target == null) {
-            setStatus("目标文件夹不存在");
+            setStatus(t("informationera.fe.status_path_not_found", targetKey));
             return;
         }
         pushUndo(fs.duplicateInto(targetKey, entry));
         afterMutation();
-        setStatus("已发送到 " + target.name);
+        setStatus(t("informationera.fe.status_sent_to", target.name));
     }
 
     // ---------- 工具方法 ----------
@@ -3365,6 +3797,13 @@ public final class FileExplorerController {
             return driveIcon(size);
         }
         return entry.folder ? folderIcon(size) : fileIcon(size);
+    }
+
+    /** 驱动器容量条（虚拟演示数据，按名称哈希生成固定占比）。 */
+    private static String driveBar(VirtualFileSystem.Entry entry) {
+        int used = Math.abs(entry.name.hashCode()) % 95 + 1;
+        return "<div class=\"fe-drive-bar\"><div class=\"fe-drive-bar-fill\" style=\"width:" + used + "%\"></div></div>"
+                + "<div class=\"fe-drive-bar-text\">" + t("informationera.fe.status_drive_used", used) + "</div>";
     }
 
     private static String folderIcon(int size) {

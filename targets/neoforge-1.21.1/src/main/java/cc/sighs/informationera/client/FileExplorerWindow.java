@@ -7,6 +7,8 @@ import com.sighs.apricityui.layout.Position;
 import com.sighs.apricityui.render.DocumentLayerOrder;
 import com.sighs.apricityui.render.Operation;
 
+import static cc.sighs.informationera.client.FileExplorerText.t;
+
 import java.util.ArrayList;
 import java.util.List;
 
@@ -30,7 +32,7 @@ public final class FileExplorerWindow {
 
     /** 跨窗口拖拽的全局状态（坐标均使用 AUI 屏幕坐标）。 */
     private static FileExplorerController dragSource;
-    private static VirtualFileSystem.Entry dragEntry;
+    private static List<VirtualFileSystem.Entry> dragEntries;
     private static String dragSourceKey;
     private static boolean dragRight;
     private static double dragStartX;
@@ -117,10 +119,10 @@ public final class FileExplorerWindow {
             return;
         }
         StringBuilder sb = new StringBuilder();
-        sb.append("<div class=\"fe-jump-item\" data-action=\"new\">打开新窗口</div>");
+        sb.append("<div class=\"fe-jump-item\" data-action=\"new\">").append(t("informationera.fe.open_new_window")).append("</div>");
         sb.append("<div class=\"fe-jump-sep\"></div>");
         if (recentPaths.isEmpty()) {
-            sb.append("<div class=\"fe-jump-item fe-jump-disabled\">暂无最近路径</div>");
+            sb.append("<div class=\"fe-jump-item fe-jump-disabled\">").append(t("informationera.fe.no_recent")).append("</div>");
         } else {
             for (String key : recentPaths) {
                 VirtualFileSystem.Folder folder = fs != null ? fs.folder(key) : null;
@@ -230,6 +232,13 @@ public final class FileExplorerWindow {
         }
     }
 
+    /** 刷新所有窗口的显示（供跨窗口撤销/重做等全局变更后调用）。 */
+    public static void refreshAll() {
+        for (FileExplorerController controller : new ArrayList<>(windows)) {
+            controller.refreshAfterExternal();
+        }
+    }
+
     public static int windowCount() {
         return windows.size();
     }
@@ -255,14 +264,14 @@ public final class FileExplorerWindow {
     }
 
     /** 源窗口在文件项按下左/右键时调用一次，登记一次潜在拖拽。 */
-    public static void beginFileDrag(FileExplorerController source, VirtualFileSystem.Entry entry,
+    public static void beginFileDrag(FileExplorerController source, List<VirtualFileSystem.Entry> entries,
                                      String sourceKey, boolean right) {
         Position mouse = Operation.getMousePositionDirectly();
-        if (mouse == null) {
+        if (mouse == null || entries.isEmpty()) {
             return;
         }
         dragSource = source;
-        dragEntry = entry;
+        dragEntries = new ArrayList<>(entries);
         dragSourceKey = sourceKey;
         dragRight = right;
         dragStartX = mouse.x;
@@ -295,7 +304,7 @@ public final class FileExplorerWindow {
             if (dragRight) {
                 dragSource.closeContextMenu();
             }
-            String html = dragSource.ghostHtmlFor(dragEntry);
+            String html = dragSource.ghostHtmlFor(dragEntries);
             showGlobalGhost(html);
         }
 
@@ -333,20 +342,53 @@ public final class FileExplorerWindow {
         if (dragRight) {
             if (target != null) {
                 // 只有成功打开 drop 菜单才抑制紧随的 contextmenu。
-                target.controller.showExternalDropMenu(dragEntry, dragSourceKey, target.key,
+                target.controller.showExternalDropMenu(dragEntries, dragSourceKey, target.key,
                         new Position(screenX, screenY), dragSource);
                 suppressNextContextMenu = true;
             }
             // target == null：不抑制，让 contextmenu 正常弹普通右键菜单。
         } else if (target != null) {
-            boolean copy = Operation.isKeyPressed("key.keyboard.left.control")
+            boolean alt = Operation.isKeyPressed("key.keyboard.left.alt")
+                    || Operation.isKeyPressed("key.keyboard.right.alt");
+            boolean ctrl = Operation.isKeyPressed("key.keyboard.left.control")
                     || Operation.isKeyPressed("key.keyboard.right.control");
-            boolean moved = dragSource.moveOrCopy(dragSourceKey, dragEntry, target.key, copy);
+            boolean moved;
+            if (alt) {
+                moved = dragSource.createShortcuts(dragSourceKey, dragEntries, target.key);
+            } else if (ctrl) {
+                moved = dragSource.moveOrCopy(dragSourceKey, dragEntries, target.key, true);
+            } else {
+                boolean crossDrive = isCrossDrive(dragSourceKey, target.key);
+                moved = dragSource.moveOrCopy(dragSourceKey, dragEntries, target.key, crossDrive);
+            }
             if (moved && target.controller != dragSource) {
                 target.controller.refreshAfterExternal();
             }
         }
         cancelDrag();
+    }
+
+    /** 判断 sourceKey 与 targetKey 是否跨越不同“磁盘”（thispc/C 与 thispc/D/E 互跨）。 */
+    private static boolean isCrossDrive(String sourceKey, String targetKey) {
+        String s = driveOf(sourceKey);
+        String t = driveOf(targetKey);
+        return s != null && t != null && !s.equals(t);
+    }
+
+    private static String driveOf(String key) {
+        if (key == null) {
+            return null;
+        }
+        if (key.equals("thispc/C") || key.startsWith("thispc/C/")) {
+            return "C";
+        }
+        if (key.equals("thispc/D") || key.startsWith("thispc/D/")) {
+            return "D";
+        }
+        if (key.equals("thispc/E") || key.startsWith("thispc/E/")) {
+            return "E";
+        }
+        return null;
     }
 
     private static DropTarget resolveDropTarget(double screenX, double screenY) {
@@ -434,7 +476,7 @@ public final class FileExplorerWindow {
     private static void cancelDrag() {
         hideGlobalGhost();
         dragSource = null;
-        dragEntry = null;
+        dragEntries = null;
         dragSourceKey = null;
         dragRight = false;
         dragActive = false;

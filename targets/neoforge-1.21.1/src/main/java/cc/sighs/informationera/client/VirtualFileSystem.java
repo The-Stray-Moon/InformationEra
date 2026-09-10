@@ -18,17 +18,28 @@ public final class VirtualFileSystem {
         public final boolean folder;
         public final long size;
         public final String modified;
+        public final String created;
         public final String type;
+        public final String author;
         /** 仅文件夹有意义：进入该文件夹所用的 key。文件为 null。 */
         public final String childKey;
+        /**
+         * 快捷方式目标：打开快捷方式时应导航到的文件夹 key。
+         * 普通条目为 null；文件夹快捷方式 = 目标文件夹 childKey；文件快捷方式 = 文件所在文件夹 key。
+         */
+        public final String shortcutTargetKey;
 
-        private Entry(String name, boolean folder, long size, String modified, String type, String childKey) {
+        private Entry(String name, boolean folder, long size, String modified, String created,
+                      String type, String author, String childKey, String shortcutTargetKey) {
             this.name = name;
             this.folder = folder;
             this.size = size;
             this.modified = modified;
+            this.created = created;
             this.type = type;
+            this.author = author;
             this.childKey = childKey;
+            this.shortcutTargetKey = shortcutTargetKey;
         }
     }
 
@@ -100,6 +111,64 @@ public final class VirtualFileSystem {
         return null;
     }
 
+    /** 自然排序：按数字段/非数字段切分，数字段按数值比较（忽略前导零），非数字段忽略大小写。 */
+    public static int naturalCompare(String a, String b) {
+        if (a == null) {
+            a = "";
+        }
+        if (b == null) {
+            b = "";
+        }
+        int ia = 0;
+        int ib = 0;
+        while (ia < a.length() && ib < b.length()) {
+            char ca = a.charAt(ia);
+            char cb = b.charAt(ib);
+            if (Character.isDigit(ca) && Character.isDigit(cb)) {
+                int ja = ia;
+                while (ja < a.length() && Character.isDigit(a.charAt(ja))) {
+                    ja++;
+                }
+                int jb = ib;
+                while (jb < b.length() && Character.isDigit(b.charAt(jb))) {
+                    jb++;
+                }
+                int cmp = compareNumeric(a.substring(ia, ja), b.substring(ib, jb));
+                if (cmp != 0) {
+                    return cmp;
+                }
+                ia = ja;
+                ib = jb;
+            } else {
+                char ua = Character.toUpperCase(ca);
+                char ub = Character.toUpperCase(cb);
+                if (ua != ub) {
+                    return ua - ub;
+                }
+                ia++;
+                ib++;
+            }
+        }
+        return (a.length() - ia) - (b.length() - ib);
+    }
+
+    private static int compareNumeric(String a, String b) {
+        int sa = 0;
+        int sb = 0;
+        while (sa < a.length() - 1 && a.charAt(sa) == '0') {
+            sa++;
+        }
+        while (sb < b.length() - 1 && b.charAt(sb) == '0') {
+            sb++;
+        }
+        String ta = a.substring(sa);
+        String tb = b.substring(sb);
+        if (ta.length() != tb.length()) {
+            return ta.length() - tb.length();
+        }
+        return ta.compareTo(tb);
+    }
+
     // ---------- 变更操作（返回撤销动作） ----------
 
     public boolean contains(String folderKey, String name) {
@@ -157,9 +226,11 @@ public final class VirtualFileSystem {
         Entry duplicate;
         if (entry.folder && entry.childKey != null) {
             String newKey = copyFolder(entry.childKey, targetKey, newName);
-            duplicate = new Entry(newName, true, -1L, entry.modified, entry.type, newKey);
+            duplicate = new Entry(newName, true, -1L, entry.modified, entry.created, entry.type,
+                    entry.author, newKey, entry.shortcutTargetKey);
         } else {
-            duplicate = new Entry(newName, false, entry.size, entry.modified, entry.type, null);
+            duplicate = new Entry(newName, false, entry.size, entry.modified, entry.created, entry.type,
+                    entry.author, null, entry.shortcutTargetKey);
         }
         target.entries.add(duplicate);
         return () -> {
@@ -181,7 +252,7 @@ public final class VirtualFileSystem {
         String key = generateKey(parentKey);
         Folder folder = new Folder(key, name, parentKey, new ArrayList<>());
         folders.put(key, folder);
-        Entry entry = new Entry(name, true, -1L, "刚刚", "文件夹", key);
+        Entry entry = new Entry(name, true, -1L, "刚刚", "刚刚", "文件夹", "sighs", key, null);
         parent.entries.add(entry);
         return () -> {
             parent.entries.remove(entry);
@@ -189,8 +260,11 @@ public final class VirtualFileSystem {
         };
     }
 
-    /** 新建快捷方式。targetKey 为快捷方式的目标 key（文件夹则为进入 key，文件则为 null 表示无法打开）。 */
-    public Runnable createShortcut(String parentKey, Entry target, String targetKey) {
+    /**
+     * 新建快捷方式。parentKey 为快捷方式所在文件夹，targetSourceKey 为目标条目所在文件夹。
+     * 目标为文件夹时快捷方式指向该文件夹；目标为文件时指向其所在文件夹（打开所在位置）。
+     */
+    public Runnable createShortcut(String parentKey, String targetSourceKey, Entry target) {
         Folder parent = folders.get(parentKey);
         if (parent == null) {
             return () -> {
@@ -198,7 +272,8 @@ public final class VirtualFileSystem {
         }
         String base = target.name + " - 快捷方式.lnk";
         String name = uniqueName(parentKey, base);
-        Entry shortcut = new Entry(name, false, 1024L, "刚刚", "快捷方式", targetKey);
+        String shortcutTargetKey = (target.folder && target.childKey != null) ? target.childKey : targetSourceKey;
+        Entry shortcut = new Entry(name, false, 1024L, "刚刚", "刚刚", "快捷方式", "sighs", null, shortcutTargetKey);
         parent.entries.add(shortcut);
         return () -> parent.entries.remove(shortcut);
     }
@@ -239,7 +314,8 @@ public final class VirtualFileSystem {
             return null;
         }
         Entry oldEntry = entry;
-        Entry newEntry = new Entry(trimmed, entry.folder, entry.size, entry.modified, entry.type, entry.childKey);
+        Entry newEntry = new Entry(trimmed, entry.folder, entry.size, entry.modified, entry.created,
+                entry.type, entry.author, entry.childKey, entry.shortcutTargetKey);
         parent.entries.set(index, newEntry);
         final String[] oldFolderName = new String[]{null};
         if (entry.folder && entry.childKey != null) {
@@ -293,9 +369,11 @@ public final class VirtualFileSystem {
         for (Entry entry : source.entries) {
             if (entry.folder && entry.childKey != null) {
                 String childKey = copyFolder(entry.childKey, newKey, entry.name);
-                copy.entries.add(new Entry(entry.name, true, -1L, entry.modified, entry.type, childKey));
+                copy.entries.add(new Entry(entry.name, true, -1L, entry.modified, entry.created,
+                        entry.type, entry.author, childKey, entry.shortcutTargetKey));
             } else {
-                copy.entries.add(new Entry(entry.name, false, entry.size, entry.modified, entry.type, null));
+                copy.entries.add(new Entry(entry.name, false, entry.size, entry.modified, entry.created,
+                        entry.type, entry.author, null, entry.shortcutTargetKey));
             }
         }
         return newKey;
@@ -385,9 +463,19 @@ public final class VirtualFileSystem {
                 file("录屏.mp4", 96_468_992, "2024/5/30 17:00", "MP4 视频")
         )));
 
+        // OneDrive：导航窗格独立节点（无父级）。
+        fs.add(new Folder("onedrive", "OneDrive", null, list(
+                folder("文档", "onedrive/documents"),
+                file("共享链接.txt", 1_024, "2024/6/1 09:00", "文本文档")
+        )));
+        fs.add(new Folder("onedrive/documents", "文档", "onedrive", list(
+                file("云端笔记.docx", 32_768, "2024/6/5 14:20", "Word 文档")
+        )));
+
         fs.add(new Folder("thispc", "此电脑", null, list(
                 drive("本地磁盘 (C:)", "thispc/C"),
-                drive("本地磁盘 (D:)", "thispc/D")
+                drive("本地磁盘 (D:)", "thispc/D"),
+                drive("可移动磁盘 (E:)", "thispc/E")
         )));
 
         fs.add(new Folder("thispc/C", "本地磁盘 (C:)", "thispc", list(
@@ -399,12 +487,16 @@ public final class VirtualFileSystem {
 
         fs.add(new Folder("thispc/C/windows", "Windows", "thispc/C", list(
                 folder("System32", "thispc/C/windows/system32"),
+                folder("Temp", "thispc/C/windows/temp"),
                 file("win.ini", 392, "2024/1/1 00:00", "配置设置")
         )));
 
         fs.add(new Folder("thispc/C/windows/system32", "System32", "thispc/C/windows", list(
                 file("kernel32.dll", 798_720, "2024/1/1 00:00", "应用程序扩展")
         )));
+
+        // 压力测试目录：约 2000 个文件，用于验证虚拟滚动与自然排序。
+        fs.add(new Folder("thispc/C/windows/temp", "Temp", "thispc/C/windows", stressFiles(2000)));
 
         fs.add(new Folder("thispc/C/program-files", "Program Files", "thispc/C", list(
                 folder("Information Era", "thispc/C/program-files/information-era"),
@@ -453,6 +545,32 @@ public final class VirtualFileSystem {
                 file("main.java", 18_240, "2024/6/11 23:00", "JAVA 文件")
         )));
 
+        fs.add(new Folder("thispc/E", "可移动磁盘 (E:)", "thispc", list(
+                file("照片_001.jpg", 3_014_656, "2024/6/11 10:00", "JPG 图片"),
+                file("安装包.msi", 45_320_192, "2024/6/10 12:30", "应用程序")
+        )));
+
+        fs.add(new Folder("thispc/libraries", "库", null, list(
+                folder("文档", "thispc/libraries/documents"),
+                folder("图片", "thispc/libraries/pictures"),
+                folder("音乐", "thispc/libraries/music"),
+                folder("视频", "thispc/libraries/videos")
+        )));
+
+        fs.add(new Folder("thispc/libraries/documents", "文档", "thispc/libraries", list()));
+        fs.add(new Folder("thispc/libraries/pictures", "图片", "thispc/libraries", list()));
+        fs.add(new Folder("thispc/libraries/music", "音乐", "thispc/libraries", list()));
+        fs.add(new Folder("thispc/libraries/videos", "视频", "thispc/libraries", list()));
+
+        fs.add(new Folder("thispc/network", "网络", null, list(
+                folder("SIGHS-PC", "thispc/network/sighs-pc")
+        )));
+        fs.add(new Folder("thispc/network/sighs-pc", "SIGHS-PC", "thispc/network", list(
+                folder("共享文档", "thispc/network/sighs-pc/shared"),
+                file("打印机.pdf", 512_000, "2024/6/1 08:00", "PDF 文档")
+        )));
+        fs.add(new Folder("thispc/network/sighs-pc/shared", "共享文档", "thispc/network/sighs-pc", list()));
+
         fs.add(new Folder("recyclebin", "回收站", null, list(
                 file("旧文件.txt", 512, "2024/5/28 16:00", "文本文档"),
                 file("已删除的截图.png", 1_208_320, "2024/5/27 09:00", "PNG 图片")
@@ -461,20 +579,30 @@ public final class VirtualFileSystem {
         return fs;
     }
 
+    /** 生成压力测试文件列表（file1.txt ... fileN.txt，含 file10 等用于自然排序验证）。 */
+    private static List<Entry> stressFiles(int count) {
+        List<Entry> entries = new ArrayList<>(count);
+        for (int i = 1; i <= count; i++) {
+            entries.add(file("file" + i + ".txt", 1_024L + (i % 100) * 17L,
+                    "2024/6/" + (1 + i % 28) + " " + (i % 24) + ":" + (i % 60), "文本文档"));
+        }
+        return entries;
+    }
+
     private void add(Folder folder) {
         folders.put(folder.key, folder);
     }
 
     private static Entry folder(String name, String childKey) {
-        return new Entry(name, true, -1L, "2024/6/12 14:30", "文件夹", childKey);
+        return new Entry(name, true, -1L, "2024/6/12 14:30", "2024/6/12 14:30", "文件夹", "sighs", childKey, null);
     }
 
     private static Entry drive(String name, String childKey) {
-        return new Entry(name, true, -1L, "2024/6/12 14:30", "本地磁盘", childKey);
+        return new Entry(name, true, -1L, "2024/6/12 14:30", "2024/6/12 14:30", "本地磁盘", "sighs", childKey, null);
     }
 
     private static Entry file(String name, long size, String modified, String type) {
-        return new Entry(name, false, size, modified, type, null);
+        return new Entry(name, false, size, modified, modified, type, "sighs", null, null);
     }
 
     @SafeVarargs
