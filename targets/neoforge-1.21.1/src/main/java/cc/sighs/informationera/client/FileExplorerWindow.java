@@ -39,6 +39,17 @@ public final class FileExplorerWindow {
     private static double dragStartY;
     private static boolean dragActive;
     private static boolean suppressNextContextMenu;
+    private static String dragCursorKind;
+    private static long hoverFolderSince = 0L;
+    private static String hoverFolderKey;
+
+    /** 跨窗口标签页拖拽的全局状态（坐标均使用 AUI 屏幕坐标）。 */
+    private static FileExplorerController tabDragSource;
+    private static int tabDragSourceIndex = -1;
+    private static FileExplorerController.Tab tabDragTab;
+    private static double tabDragStartX;
+    private static double tabDragStartY;
+    private static boolean tabDragActive;
 
     private FileExplorerWindow() {
     }
@@ -309,6 +320,7 @@ public final class FileExplorerWindow {
         }
 
         moveGlobalGhost();
+        updateDragCursorAndHover(mouse);
 
         // 右键拖拽的释放由 document mouseup 同步处理，避免 contextmenu 与 tick 竞争；
         // 左键跨窗口拖拽仍由这里轮询释放。
@@ -317,6 +329,201 @@ public final class FileExplorerWindow {
             if (released) {
                 finishDrag(mouse.x, mouse.y);
             }
+        }
+    }
+
+    // ---------- 跨窗口标签页拖拽 ----------
+
+    /** 源窗口标签页按下时上报一次（多窗口场景）。 */
+    public static void beginTabDrag(FileExplorerController source, int tabIndex, double screenX, double screenY) {
+        tabDragSource = source;
+        tabDragSourceIndex = tabIndex;
+        tabDragTab = null;
+        tabDragStartX = screenX;
+        tabDragStartY = screenY;
+        tabDragActive = false;
+    }
+
+    public static boolean isTabDragActive() {
+        return tabDragSource != null;
+    }
+
+    /** 每 tick 推进标签页拖拽（与文件拖拽共用 tick 入口）。 */
+    public static void tabDragTick() {
+        if (tabDragSource == null) {
+            return;
+        }
+        Position mouse = Operation.getMousePositionDirectly();
+        if (mouse == null) {
+            return;
+        }
+        if (!tabDragActive) {
+            double dx = mouse.x - tabDragStartX;
+            double dy = mouse.y - tabDragStartY;
+            if (dx * dx + dy * dy <= 25) {
+                return;
+            }
+            tabDragActive = true;
+            // 快照标签状态（在拖拽开始时保存一次）。
+            tabDragSource.saveActiveTabState();
+            FileExplorerController.Tab tab = tabDragSource.tabs.get(tabDragSourceIndex);
+            tabDragTab = cloneTab(tab);
+            showGlobalGhost("<div class=\"fe-ghost-row\">" + folderIcon(16)
+                    + "<span>" + FileExplorerController.escape(tab.title) + "</span></div>");
+        }
+        moveGlobalGhost();
+        boolean released = (Operation.getMouseButtons() & 1) == 0;
+        if (released) {
+            finishTabDrag(mouse.x, mouse.y);
+        }
+    }
+
+    private static FileExplorerController.Tab cloneTab(FileExplorerController.Tab src) {
+        FileExplorerController.Tab dst = new FileExplorerController.Tab();
+        dst.title = src.title;
+        dst.currentKey = src.currentKey;
+        dst.backStack.addAll(src.backStack);
+        dst.forwardStack.addAll(src.forwardStack);
+        dst.selected.addAll(src.selected);
+        dst.expandedSidebar.addAll(src.expandedSidebar);
+        dst.viewMode = src.viewMode;
+        dst.iconSize = src.iconSize;
+        dst.sortField = src.sortField;
+        dst.sortAsc = src.sortAsc;
+        dst.foldersFirst = src.foldersFirst;
+        dst.searchQuery = src.searchQuery;
+        dst.lastClickedIndex = src.lastClickedIndex;
+        return dst;
+    }
+
+    private static void finishTabDrag(double screenX, double screenY) {
+        Position screenPos = new Position(screenX, screenY);
+        FileExplorerController target = hitTabStripController(screenPos);
+        if (target == tabDragSource) {
+            // 同窗口释放：保持原标签页重排逻辑。
+            tabDragSource.reorderTabToScreen(screenPos, tabDragSourceIndex);
+        } else if (target != null && target != tabDragSource) {
+            // 合并到目标窗口标签栏。
+            FileExplorerController.Tab tab = tabDragSource.detachTab(tabDragSourceIndex);
+            if (tab == null && tabDragTab != null) {
+                tab = cloneTab(tabDragTab);
+                tabDragSource.tabs.remove(tabDragSourceIndex);
+                if (tabDragSource.tabs.isEmpty()) {
+                    tabDragSource.closeWindow();
+                }
+            }
+            if (tab != null) {
+                target.adoptTab(tab);
+            }
+        } else {
+            // 拖到窗口外空白：形成新窗口。
+            FileExplorerController.Tab tab = tabDragSource.detachTab(tabDragSourceIndex);
+            if (tab == null && tabDragTab != null) {
+                tab = cloneTab(tabDragTab);
+                tabDragSource.tabs.remove(tabDragSourceIndex);
+                if (tabDragSource.tabs.isEmpty()) {
+                    tabDragSource.closeWindow();
+                }
+            }
+            if (tab != null) {
+                openWithTab(tab);
+            }
+        }
+        cancelTabDrag();
+    }
+
+    private static FileExplorerController hitTabStripController(Position screenPos) {
+        List<Document> layered = DocumentLayerOrder.frontToBack(Document.getAll());
+        if (layered == null) {
+            return null;
+        }
+        for (Document document : layered) {
+            FileExplorerController controller = controllerFor(document);
+            if (controller != null && controller.hitTabStrip(screenPos)) {
+                return controller;
+            }
+        }
+        return null;
+    }
+
+    private static void openWithTab(FileExplorerController.Tab tab) {
+        if (fs == null) {
+            fs = VirtualFileSystem.create();
+        }
+        Document document = ApricityUI.createDocument(TEMPLATE);
+        if (document == null) {
+            return;
+        }
+        document.setReloadPersistent(true);
+        FileExplorerController controller = new FileExplorerController(fs);
+        controller.mount(document);
+        windows.add(controller);
+        FileExplorerController.setActive(controller);
+        focus(controller);
+        controller.adoptTab(tab);
+    }
+
+    private static void cancelTabDrag() {
+        hideGlobalGhost();
+        tabDragSource = null;
+        tabDragSourceIndex = -1;
+        tabDragTab = null;
+        tabDragActive = false;
+    }
+
+    private static String folderIcon(int size) {
+        return "<svg viewBox=\"0 0 24 24\" style=\"width:" + size + "px;height:" + size
+                + "px;color:var(--ore-gold)\"><path d=\"M3 7h6l2 2h10v11H3z\" fill=\"currentColor\"/></svg>";
+    }
+
+    /** 拖拽激活期间：实时解析落点，结合修饰键计算光标类型，并在文件夹上停留超时自动展开。 */
+    private static void updateDragCursorAndHover(Position mouse) {
+        DropTarget target = resolveDropTarget(mouse.x, mouse.y);
+        boolean alt = Operation.isKeyPressed("key.keyboard.left.alt")
+                || Operation.isKeyPressed("key.keyboard.right.alt");
+        boolean ctrl = Operation.isKeyPressed("key.keyboard.left.control")
+                || Operation.isKeyPressed("key.keyboard.right.control");
+
+        if (target == null) {
+            dragCursorKind = "notallowed";
+            hoverFolderSince = 0L;
+            hoverFolderKey = null;
+            setGhostBadge("⊘");
+            return;
+        }
+
+        String folderKey = target.key;
+        boolean hitFolderRow = !folderKey.equals(target.controller.currentKey());
+        // 计算光标：Alt=快捷方式，Ctrl=复制，同盘默认移动，跨盘复制。
+        if (alt) {
+            dragCursorKind = "link";
+            setGhostBadge("→");
+        } else if (ctrl) {
+            dragCursorKind = "copy";
+            setGhostBadge("+");
+        } else if (isCrossDrive(dragSourceKey, folderKey)) {
+            dragCursorKind = "copy";
+            setGhostBadge("+");
+        } else {
+            dragCursorKind = "arrow";
+            setGhostBadge("");
+        }
+
+        // 悬停文件夹自动展开。
+        if (hitFolderRow && !folderKey.equals(hoverFolderKey)) {
+            hoverFolderKey = folderKey;
+            hoverFolderSince = System.currentTimeMillis();
+        }
+        if (hitFolderRow && hoverFolderKey != null && hoverFolderKey.equals(folderKey)
+                && System.currentTimeMillis() - hoverFolderSince > 600L) {
+            if (!folderKey.equals(target.controller.currentKey())) {
+                target.controller.navigateToExternal(folderKey);
+            }
+            hoverFolderSince = System.currentTimeMillis();
+        }
+        if (!hitFolderRow) {
+            hoverFolderKey = null;
+            hoverFolderSince = 0L;
         }
     }
 
@@ -480,6 +687,30 @@ public final class FileExplorerWindow {
         dragSourceKey = null;
         dragRight = false;
         dragActive = false;
+        dragCursorKind = null;
+        hoverFolderSince = 0L;
+        hoverFolderKey = null;
+    }
+
+    /** 供 FileExplorerCursor 设置拖拽光标类型。 */
+    public static void setDragCursorKind(String kind) {
+        dragCursorKind = kind;
+    }
+
+    /** 返回拖拽激活期间的光标类型（覆盖 hitTest 结果）。 */
+    public static String getDragCursorKind() {
+        return dragCursorKind;
+    }
+
+    private static void setGhostBadge(String text) {
+        Element ghost = FileExplorerTrigger.getGlobalGhost();
+        if (ghost == null) {
+            return;
+        }
+        Element badge = ghost.querySelector(".fe-ghost-badge");
+        if (badge != null) {
+            badge.setTextContent(text);
+        }
     }
 
     /** 一次拖拽的落点：目标窗口 + 目标文件夹 key。 */

@@ -6,6 +6,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import static cc.sighs.informationera.client.FileExplorerText.t;
+
 /**
  * 纯内存的虚拟文件系统。只用于演示“文件资源管理器”界面，
  * 不读写任何本地真实文件。支持剪切/复制/粘贴/删除/新建/撤销所需的变更。
@@ -59,7 +61,38 @@ public final class VirtualFileSystem {
     }
 
     private final Map<String, Folder> folders = new LinkedHashMap<>();
+    /** 回收站登记表：id -> 被删除条目及其原位置/子树。 */
+    private final Map<String, RecycleEntry> recycleEntries = new LinkedHashMap<>();
     private int nextId = 0;
+
+    /** 回收站中的一条记录。 */
+    public static final class RecycleEntry {
+        public final String id;
+        public final String folderKey;
+        public final Entry entry;
+        public final Map<String, Folder> subtree;
+        public final long deletedAt;
+
+        private RecycleEntry(String id, String folderKey, Entry entry, Map<String, Folder> subtree, long deletedAt) {
+            this.id = id;
+            this.folderKey = folderKey;
+            this.entry = entry;
+            this.subtree = subtree;
+            this.deletedAt = deletedAt;
+        }
+    }
+
+    /** 当前回收站内容（按删除时间倒序）。 */
+    public List<RecycleEntry> recycleEntries() {
+        List<RecycleEntry> result = new ArrayList<>(recycleEntries.values());
+        result.sort((a, b) -> Long.compare(b.deletedAt, a.deletedAt));
+        return result;
+    }
+
+    /** 判断某目录下是否存在指定名称的条目。 */
+    public boolean hasName(String folderKey, String name) {
+        return contains(folderKey, name);
+    }
 
     public Folder folder(String key) {
         return folders.get(key);
@@ -222,7 +255,7 @@ public final class VirtualFileSystem {
             return () -> {
             };
         }
-        String newName = uniqueName(targetKey, entry.name);
+        String newName = uniqueCopyName(targetKey, entry.name);
         Entry duplicate;
         if (entry.folder && entry.childKey != null) {
             String newKey = copyFolder(entry.childKey, targetKey, newName);
@@ -252,7 +285,8 @@ public final class VirtualFileSystem {
         String key = generateKey(parentKey);
         Folder folder = new Folder(key, name, parentKey, new ArrayList<>());
         folders.put(key, folder);
-        Entry entry = new Entry(name, true, -1L, "刚刚", "刚刚", "文件夹", "sighs", key, null);
+        Entry entry = new Entry(name, true, -1L, t("informationera.fe.just_now"), t("informationera.fe.just_now"),
+                t("informationera.fe.folder_type"), "sighs", key, null);
         parent.entries.add(entry);
         return () -> {
             parent.entries.remove(entry);
@@ -270,10 +304,11 @@ public final class VirtualFileSystem {
             return () -> {
             };
         }
-        String base = target.name + " - 快捷方式.lnk";
+        String base = target.name + " - " + t("informationera.fe.shortcut_suffix") + ".lnk";
         String name = uniqueName(parentKey, base);
         String shortcutTargetKey = (target.folder && target.childKey != null) ? target.childKey : targetSourceKey;
-        Entry shortcut = new Entry(name, false, 1024L, "刚刚", "刚刚", "快捷方式", "sighs", null, shortcutTargetKey);
+        Entry shortcut = new Entry(name, false, 1024L, t("informationera.fe.just_now"), t("informationera.fe.just_now"),
+                t("informationera.fe.shortcut_type"), "sighs", null, shortcutTargetKey);
         parent.entries.add(shortcut);
         return () -> parent.entries.remove(shortcut);
     }
@@ -296,6 +331,184 @@ public final class VirtualFileSystem {
         return () -> {
             parent.entries.add(entry);
             folders.putAll(removed);
+        };
+    }
+
+    /**
+     * 把条目（含子树）移到回收站。成功返回撤销动作，失败（找不到父目录）返回 null。
+     * 回收站采用“真实 Folder”方案：entry 原样放进 recyclebin 的 entries，同时登记原位置与子树。
+     */
+    public Runnable moveToRecycle(String folderKey, Entry entry) {
+        Folder parent = folders.get(folderKey);
+        Folder recycle = folders.get("recyclebin");
+        if (parent == null || recycle == null) {
+            return null;
+        }
+        if (!parent.entries.remove(entry)) {
+            return null;
+        }
+        // 回收站内不允许同名条目：若已存在同名，则改名（如“旧文件 (2)”）。
+        Entry entryToMove = entry;
+        String name = entryToMove.name;
+        if (contains("recyclebin", name)) {
+            name = uniqueName("recyclebin", name);
+            Entry renamed = new Entry(name, entryToMove.folder, entryToMove.size, entryToMove.modified,
+                    entryToMove.created, entryToMove.type, entryToMove.author,
+                    entryToMove.childKey, entryToMove.shortcutTargetKey);
+            if (entryToMove.folder && entryToMove.childKey != null) {
+                Folder child = folders.get(entryToMove.childKey);
+                if (child != null) {
+                    child.name = name;
+                }
+            }
+            entryToMove = renamed;
+        }
+        Map<String, Folder> removed = new LinkedHashMap<>();
+        if (entryToMove.folder && entryToMove.childKey != null) {
+            collectSubtree(entryToMove.childKey, removed);
+        }
+        String id = "r" + (++nextId);
+        long now = System.currentTimeMillis();
+        RecycleEntry record = new RecycleEntry(id, folderKey, entryToMove, removed, now);
+        recycleEntries.put(id, record);
+        recycle.entries.add(entryToMove);
+        if (entryToMove.folder && entryToMove.childKey != null) {
+            Folder child = folders.get(entryToMove.childKey);
+            if (child != null) {
+                child.parentKey = "recyclebin";
+            }
+        }
+        final Entry movedEntry = entryToMove;
+        return () -> {
+            recycle.entries.remove(movedEntry);
+            recycleEntries.remove(id);
+            parent.entries.add(movedEntry);
+            if (movedEntry.folder && movedEntry.childKey != null) {
+                Folder child = folders.get(movedEntry.childKey);
+                if (child != null) {
+                    child.parentKey = folderKey;
+                }
+            }
+            folders.putAll(removed);
+        };
+    }
+
+    /** 还原回收站中的一条记录。成功返回撤销动作（撤销 = 重新放回回收站）。 */
+    public Runnable restoreFromRecycle(String id) {
+        RecycleEntry record = recycleEntries.get(id);
+        if (record == null) {
+            return null;
+        }
+        Folder recycle = folders.get("recyclebin");
+        Folder target = folders.get(record.folderKey);
+        if (recycle == null || target == null || !recycle.entries.remove(record.entry)) {
+            return null;
+        }
+        // 原位置若有同名，则改名。
+        RecycleEntry recordToRestore = record;
+        String name = recordToRestore.entry.name;
+        if (contains(recordToRestore.folderKey, name)) {
+            name = uniqueName(recordToRestore.folderKey, name);
+            Entry renamed = new Entry(name, recordToRestore.entry.folder, recordToRestore.entry.size,
+                    recordToRestore.entry.modified, recordToRestore.entry.created, recordToRestore.entry.type,
+                    recordToRestore.entry.author, recordToRestore.entry.childKey, recordToRestore.entry.shortcutTargetKey);
+            if (recordToRestore.entry.folder && recordToRestore.entry.childKey != null) {
+                Folder child = folders.get(recordToRestore.entry.childKey);
+                if (child != null) {
+                    child.name = name;
+                }
+            }
+            recordToRestore = new RecycleEntry(id, recordToRestore.folderKey, renamed,
+                    recordToRestore.subtree, recordToRestore.deletedAt);
+            recycleEntries.put(id, recordToRestore);
+        }
+        // 子树要放回 folders。
+        for (Folder folder : recordToRestore.subtree.values()) {
+            folders.put(folder.key, folder);
+        }
+        target.entries.add(recordToRestore.entry);
+        if (recordToRestore.entry.folder && recordToRestore.entry.childKey != null) {
+            Folder child = folders.get(recordToRestore.entry.childKey);
+            if (child != null) {
+                child.parentKey = recordToRestore.folderKey;
+            }
+        }
+        recycleEntries.remove(id);
+        final RecycleEntry restoredRecord = recordToRestore;
+        return () -> {
+            target.entries.remove(restoredRecord.entry);
+            Map<String, Folder> removed = new LinkedHashMap<>();
+            if (restoredRecord.entry.folder && restoredRecord.entry.childKey != null) {
+                collectSubtree(restoredRecord.entry.childKey, removed);
+            }
+            recycle.entries.add(restoredRecord.entry);
+            if (restoredRecord.entry.folder && restoredRecord.entry.childKey != null) {
+                Folder child = folders.get(restoredRecord.entry.childKey);
+                if (child != null) {
+                    child.parentKey = "recyclebin";
+                }
+            }
+            recycleEntries.put(id, restoredRecord);
+        };
+    }
+
+    /** 还原回收站中全部记录。返回撤销动作（撤销 = 全部重新放回回收站）。 */
+    public Runnable restoreAllFromRecycle() {
+        List<RecycleEntry> all = recycleEntries();
+        List<Runnable> undos = new ArrayList<>();
+        for (RecycleEntry record : all) {
+            Runnable undo = restoreFromRecycle(record.id);
+            if (undo != null) {
+                undos.add(undo);
+            }
+        }
+        if (undos.isEmpty()) {
+            return () -> {
+            };
+        }
+        return () -> {
+            for (int i = undos.size() - 1; i >= 0; i--) {
+                undos.get(i).run();
+            }
+        };
+    }
+
+    /** 永久清空回收站（丢弃登记并移除子树）。返回撤销动作（撤销 = 全部放回回收站）。 */
+    public Runnable emptyRecycle() {
+        List<RecycleEntry> all = recycleEntries();
+        if (all.isEmpty()) {
+            return () -> {
+            };
+        }
+        Folder recycle = folders.get("recyclebin");
+        List<Runnable> restores = new ArrayList<>();
+        for (RecycleEntry record : all) {
+            if (recycle != null) {
+                recycle.entries.remove(record.entry);
+            }
+            recycleEntries.remove(record.id);
+            // 子树已经不在 folders 里（移入回收站时被 collectSubtree 移出），永久丢弃即可；
+            // 但为可撤销，恢复时需放回子树并重建记录。
+            restores.add(() -> {
+                recycleEntries.put(record.id, record);
+                for (Folder folder : record.subtree.values()) {
+                    folders.put(folder.key, folder);
+                }
+                if (recycle != null) {
+                    recycle.entries.add(record.entry);
+                }
+                if (record.entry.folder && record.entry.childKey != null) {
+                    Folder child = folders.get(record.entry.childKey);
+                    if (child != null) {
+                        child.parentKey = "recyclebin";
+                    }
+                }
+            });
+        }
+        return () -> {
+            for (int i = restores.size() - 1; i >= 0; i--) {
+                restores.get(i).run();
+            }
         };
     }
 
@@ -347,6 +560,96 @@ public final class VirtualFileSystem {
             n++;
         }
         return base + " (" + n + ")";
+    }
+
+    /** 复制/粘贴副本命名：xxx - 副本、xxx - 副本 (2)、xxx - 副本 (3) ... */
+    private String uniqueCopyName(String folderKey, String base) {
+        String copySuffix = " - " + t("informationera.fe.copy_suffix");
+        String candidate = base + copySuffix;
+        if (!contains(folderKey, candidate)) {
+            return candidate;
+        }
+        int n = 2;
+        while (contains(folderKey, base + copySuffix + " (" + n + ")")) {
+            n++;
+        }
+        return base + copySuffix + " (" + n + ")";
+    }
+
+    /**
+     * 用 sourceEntry 覆盖 targetKey 下同名条目：删除目标后写入，返回撤销动作。
+     * 目标不存在同名时等价于普通复制/移动后的写入逻辑由调用方处理，这里只在确有同名时使用。
+     * 返回 null 表示目标文件夹不存在或未找到同名条目。
+     */
+    public Runnable replace(String targetKey, Entry sourceEntry, boolean copy, String sourceKey) {
+        Folder target = folders.get(targetKey);
+        if (target == null) {
+            return null;
+        }
+        Entry existing = null;
+        for (Entry e : target.entries) {
+            if (e.name.equals(sourceEntry.name)) {
+                existing = e;
+                break;
+            }
+        }
+        if (existing == null) {
+            return null;
+        }
+        final Entry existingEntry = existing;
+        Map<String, Folder> removed = new LinkedHashMap<>();
+        if (existingEntry.folder && existingEntry.childKey != null) {
+            collectSubtree(existingEntry.childKey, removed);
+        }
+        target.entries.remove(existingEntry);
+
+        Entry written;
+        if (copy) {
+            if (sourceEntry.folder && sourceEntry.childKey != null) {
+                String newKey = copyFolder(sourceEntry.childKey, targetKey, sourceEntry.name);
+                written = new Entry(sourceEntry.name, true, -1L, sourceEntry.modified, sourceEntry.created,
+                        sourceEntry.type, sourceEntry.author, newKey, sourceEntry.shortcutTargetKey);
+            } else {
+                written = new Entry(sourceEntry.name, false, sourceEntry.size, sourceEntry.modified,
+                        sourceEntry.created, sourceEntry.type, sourceEntry.author, null, sourceEntry.shortcutTargetKey);
+            }
+            target.entries.add(written);
+            return () -> {
+                target.entries.remove(written);
+                if (written.folder && written.childKey != null) {
+                    collectSubtree(written.childKey, new LinkedHashMap<>());
+                }
+                target.entries.add(existingEntry);
+                folders.putAll(removed);
+            };
+        } else {
+            Folder source = folders.get(sourceKey);
+            if (source == null || !source.entries.remove(sourceEntry)) {
+                target.entries.add(existingEntry);
+                folders.putAll(removed);
+                return () -> {
+                };
+            }
+            target.entries.add(sourceEntry);
+            if (sourceEntry.folder && sourceEntry.childKey != null) {
+                Folder child = folders.get(sourceEntry.childKey);
+                if (child != null) {
+                    child.parentKey = targetKey;
+                }
+            }
+            return () -> {
+                target.entries.remove(sourceEntry);
+                source.entries.add(sourceEntry);
+                if (sourceEntry.folder && sourceEntry.childKey != null) {
+                    Folder child = folders.get(sourceEntry.childKey);
+                    if (child != null) {
+                        child.parentKey = sourceKey;
+                    }
+                }
+                target.entries.add(existingEntry);
+                folders.putAll(removed);
+            };
+        }
     }
 
     private String generateKey(String parentKey) {
@@ -402,74 +705,74 @@ public final class VirtualFileSystem {
                 folder("图片", "pictures"),
                 folder("音乐", "music"),
                 folder("视频", "videos"),
-                file("快速访问说明.txt", 1_248, "2024/6/1 09:20", "文本文档"),
-                file("项目规划.docx", 48_112, "2024/6/11 18:44", "Word 文档"),
-                file("新建文本文档.txt", 0, "2024/6/12 07:55", "文本文档")
+                file("快速访问说明.txt", 1_248, "2024/6/1 09:20", t("informationera.fe.type_text")),
+                file("项目规划.docx", 48_112, "2024/6/11 18:44", t("informationera.fe.type_word")),
+                file("新建文本文档.txt", 0, "2024/6/12 07:55", t("informationera.fe.type_text"))
         )));
 
         fs.add(new Folder("desktop", "桌面", "home", list(
                 folder("工作", "desktop/work"),
-                file("截图.png", 2_118_332, "2024/6/10 22:05", "PNG 图片"),
-                file("记事本.txt", 2_304, "2024/6/9 16:12", "文本文档"),
-                file("启动器.lnk", 1_204, "2024/6/8 11:30", "快捷方式")
+                file("截图.png", 2_118_332, "2024/6/10 22:05", t("informationera.fe.type_png")),
+                file("记事本.txt", 2_304, "2024/6/9 16:12", t("informationera.fe.type_text")),
+                file("启动器.lnk", 1_204, "2024/6/8 11:30", t("informationera.fe.shortcut_type"))
         )));
 
         fs.add(new Folder("desktop/work", "工作", "desktop", list(
                 folder("资料", "desktop/work/materials"),
-                file("周报.docx", 26_140, "2024/6/11 18:40", "Word 文档"),
-                file("数据表.xlsx", 64_512, "2024/6/10 15:02", "Excel 工作表")
+                file("周报.docx", 26_140, "2024/6/11 18:40", t("informationera.fe.type_word")),
+                file("数据表.xlsx", 64_512, "2024/6/10 15:02", t("informationera.fe.type_excel"))
         )));
 
         fs.add(new Folder("desktop/work/materials", "资料", "desktop/work", list(
-                file("说明文档.pdf", 1_512_960, "2024/6/5 10:20", "PDF 文档"),
-                file("模板.zip", 5_228_600, "2024/6/4 14:11", "压缩文件夹")
+                file("说明文档.pdf", 1_512_960, "2024/6/5 10:20", t("informationera.fe.type_pdf")),
+                file("模板.zip", 5_228_600, "2024/6/4 14:11", t("informationera.fe.type_zip"))
         )));
 
         fs.add(new Folder("downloads", "下载", "home", list(
-                file("apricityui-1.2.4.jar", 5_315_260, "2024/6/12 13:08", "JAR 文件"),
-                file("安装包.exe", 94_371_840, "2024/6/7 20:31", "应用程序"),
-                file("壁纸.jpg", 4_102_340, "2024/6/6 09:15", "JPG 图片")
+                file("apricityui-1.2.4.jar", 5_315_260, "2024/6/12 13:08", t("informationera.fe.type_jar")),
+                file("安装包.exe", 94_371_840, "2024/6/7 20:31", t("informationera.fe.type_app")),
+                file("壁纸.jpg", 4_102_340, "2024/6/6 09:15", t("informationera.fe.type_jpg"))
         )));
 
         fs.add(new Folder("documents", "文档", "home", list(
                 folder("稿件", "documents/drafts"),
-                file("毕业论文.docx", 1_208_322, "2024/6/3 21:48", "Word 文档"),
-                file("备忘.txt", 512, "2024/6/2 08:30", "文本文档")
+                file("毕业论文.docx", 1_208_322, "2024/6/3 21:48", t("informationera.fe.type_word")),
+                file("备忘.txt", 512, "2024/6/2 08:30", t("informationera.fe.type_text"))
         )));
 
         fs.add(new Folder("documents/drafts", "稿件", "documents", list(
-                file("第一章.txt", 20_480, "2024/6/1 12:00", "文本文档"),
-                file("第二章.txt", 18_432, "2024/6/2 19:20", "文本文档")
+                file("第一章.txt", 20_480, "2024/6/1 12:00", t("informationera.fe.type_text")),
+                file("第二章.txt", 18_432, "2024/6/2 19:20", t("informationera.fe.type_text"))
         )));
 
         fs.add(new Folder("pictures", "图片", "home", list(
                 folder("壁纸", "pictures/wallpapers"),
-                file("截图_001.png", 2_204_160, "2024/6/10 22:05", "PNG 图片"),
-                file("全家福.jpg", 6_820_400, "2024/5/20 13:00", "JPG 图片")
+                file("截图_001.png", 2_204_160, "2024/6/10 22:05", t("informationera.fe.type_png")),
+                file("全家福.jpg", 6_820_400, "2024/5/20 13:00", t("informationera.fe.type_jpg"))
         )));
 
         fs.add(new Folder("pictures/wallpapers", "壁纸", "pictures", list(
-                file("山景.png", 3_145_728, "2024/5/18 08:00", "PNG 图片"),
-                file("星空.png", 2_621_440, "2024/5/17 08:00", "PNG 图片")
+                file("山景.png", 3_145_728, "2024/5/18 08:00", t("informationera.fe.type_png")),
+                file("星空.png", 2_621_440, "2024/5/17 08:00", t("informationera.fe.type_png"))
         )));
 
         fs.add(new Folder("music", "音乐", "home", list(
-                file("片头曲.mp3", 8_912_896, "2024/5/25 20:00", "MP3 音频"),
-                file("背景音乐.mp3", 12_582_912, "2024/5/24 20:00", "MP3 音频")
+                file("片头曲.mp3", 8_912_896, "2024/5/25 20:00", t("informationera.fe.type_mp3")),
+                file("背景音乐.mp3", 12_582_912, "2024/5/24 20:00", t("informationera.fe.type_mp3"))
         )));
 
         fs.add(new Folder("videos", "视频", "home", list(
-                file("演示.mp4", 214_748_364, "2024/6/1 10:00", "MP4 视频"),
-                file("录屏.mp4", 96_468_992, "2024/5/30 17:00", "MP4 视频")
+                file("演示.mp4", 214_748_364, "2024/6/1 10:00", t("informationera.fe.type_mp4")),
+                file("录屏.mp4", 96_468_992, "2024/5/30 17:00", t("informationera.fe.type_mp4"))
         )));
 
         // OneDrive：导航窗格独立节点（无父级）。
         fs.add(new Folder("onedrive", "OneDrive", null, list(
                 folder("文档", "onedrive/documents"),
-                file("共享链接.txt", 1_024, "2024/6/1 09:00", "文本文档")
+                file("共享链接.txt", 1_024, "2024/6/1 09:00", t("informationera.fe.type_text"))
         )));
         fs.add(new Folder("onedrive/documents", "文档", "onedrive", list(
-                file("云端笔记.docx", 32_768, "2024/6/5 14:20", "Word 文档")
+                file("云端笔记.docx", 32_768, "2024/6/5 14:20", t("informationera.fe.type_word"))
         )));
 
         fs.add(new Folder("thispc", "此电脑", null, list(
@@ -482,17 +785,17 @@ public final class VirtualFileSystem {
                 folder("Windows", "thispc/C/windows"),
                 folder("Program Files", "thispc/C/program-files"),
                 folder("用户", "thispc/C/users"),
-                file("pagefile.sys", 4_294_967_296L, "2024/6/12 14:00", "系统文件")
+                file("pagefile.sys", 4_294_967_296L, "2024/6/12 14:00", t("informationera.fe.type_system"))
         )));
 
         fs.add(new Folder("thispc/C/windows", "Windows", "thispc/C", list(
                 folder("System32", "thispc/C/windows/system32"),
                 folder("Temp", "thispc/C/windows/temp"),
-                file("win.ini", 392, "2024/1/1 00:00", "配置设置")
+                file("win.ini", 392, "2024/1/1 00:00", t("informationera.fe.type_config"))
         )));
 
         fs.add(new Folder("thispc/C/windows/system32", "System32", "thispc/C/windows", list(
-                file("kernel32.dll", 798_720, "2024/1/1 00:00", "应用程序扩展")
+                file("kernel32.dll", 798_720, "2024/1/1 00:00", t("informationera.fe.type_dll"))
         )));
 
         // 压力测试目录：约 2000 个文件，用于验证虚拟滚动与自然排序。
@@ -504,11 +807,11 @@ public final class VirtualFileSystem {
         )));
 
         fs.add(new Folder("thispc/C/program-files/information-era", "Information Era", "thispc/C/program-files", list(
-                file("informationera.jar", 12_456_960, "2024/6/12 13:08", "JAR 文件")
+                file("informationera.jar", 12_456_960, "2024/6/12 13:08", t("informationera.fe.type_jar"))
         )));
 
         fs.add(new Folder("thispc/C/program-files/common-files", "Common Files", "thispc/C/program-files", list(
-                file("readme.txt", 1_024, "2024/1/1 00:00", "文本文档")
+                file("readme.txt", 1_024, "2024/1/1 00:00", t("informationera.fe.type_text"))
         )));
 
         fs.add(new Folder("thispc/C/users", "用户", "thispc/C", list(
@@ -517,12 +820,12 @@ public final class VirtualFileSystem {
         )));
 
         fs.add(new Folder("thispc/C/users/public", "Public", "thispc/C/users", list(
-                file("desktop.ini", 220, "2024/1/1 00:00", "配置设置")
+                file("desktop.ini", 220, "2024/1/1 00:00", t("informationera.fe.type_config"))
         )));
 
         fs.add(new Folder("thispc/C/users/sighs", "sighs", "thispc/C/users", list(
                 folder("Downloads", "thispc/C/users/sighs/downloads"),
-                file("desktop.ini", 220, "2024/1/1 00:00", "配置设置")
+                file("desktop.ini", 220, "2024/1/1 00:00", t("informationera.fe.type_config"))
         )));
 
         fs.add(new Folder("thispc/C/users/sighs/downloads", "Downloads", "thispc/C/users/sighs", list()));
@@ -530,11 +833,11 @@ public final class VirtualFileSystem {
         fs.add(new Folder("thispc/D", "本地磁盘 (D:)", "thispc", list(
                 folder("Games", "thispc/D/games"),
                 folder("Work", "thispc/D/work"),
-                file("备份.zip", 1_048_576_000L, "2024/6/1 02:00", "压缩文件夹")
+                file("备份.zip", 1_048_576_000L, "2024/6/1 02:00", t("informationera.fe.type_zip"))
         )));
 
         fs.add(new Folder("thispc/D/games", "Games", "thispc/D", list(
-                file("minecraft.exe", 42_150_400, "2024/5/30 18:00", "应用程序")
+                file("minecraft.exe", 42_150_400, "2024/5/30 18:00", t("informationera.fe.type_app"))
         )));
 
         fs.add(new Folder("thispc/D/work", "Work", "thispc/D", list(
@@ -542,12 +845,12 @@ public final class VirtualFileSystem {
         )));
 
         fs.add(new Folder("thispc/D/work/project-a", "ProjectA", "thispc/D/work", list(
-                file("main.java", 18_240, "2024/6/11 23:00", "JAVA 文件")
+                file("main.java", 18_240, "2024/6/11 23:00", t("informationera.fe.type_java"))
         )));
 
         fs.add(new Folder("thispc/E", "可移动磁盘 (E:)", "thispc", list(
-                file("照片_001.jpg", 3_014_656, "2024/6/11 10:00", "JPG 图片"),
-                file("安装包.msi", 45_320_192, "2024/6/10 12:30", "应用程序")
+                file("照片_001.jpg", 3_014_656, "2024/6/11 10:00", t("informationera.fe.type_jpg")),
+                file("安装包.msi", 45_320_192, "2024/6/10 12:30", t("informationera.fe.type_app"))
         )));
 
         fs.add(new Folder("thispc/libraries", "库", null, list(
@@ -567,14 +870,12 @@ public final class VirtualFileSystem {
         )));
         fs.add(new Folder("thispc/network/sighs-pc", "SIGHS-PC", "thispc/network", list(
                 folder("共享文档", "thispc/network/sighs-pc/shared"),
-                file("打印机.pdf", 512_000, "2024/6/1 08:00", "PDF 文档")
+                file("打印机.pdf", 512_000, "2024/6/1 08:00", t("informationera.fe.type_pdf"))
         )));
         fs.add(new Folder("thispc/network/sighs-pc/shared", "共享文档", "thispc/network/sighs-pc", list()));
 
-        fs.add(new Folder("recyclebin", "回收站", null, list(
-                file("旧文件.txt", 512, "2024/5/28 16:00", "文本文档"),
-                file("已删除的截图.png", 1_208_320, "2024/5/27 09:00", "PNG 图片")
-        )));
+        // 回收站是真实 Folder：删除时把条目放进这里，还原时取出。
+        fs.add(new Folder("recyclebin", t("informationera.fe.recycle_bin"), null, list()));
 
         return fs;
     }
@@ -584,7 +885,7 @@ public final class VirtualFileSystem {
         List<Entry> entries = new ArrayList<>(count);
         for (int i = 1; i <= count; i++) {
             entries.add(file("file" + i + ".txt", 1_024L + (i % 100) * 17L,
-                    "2024/6/" + (1 + i % 28) + " " + (i % 24) + ":" + (i % 60), "文本文档"));
+                    "2024/6/" + (1 + i % 28) + " " + (i % 24) + ":" + (i % 60), t("informationera.fe.type_text")));
         }
         return entries;
     }
@@ -594,11 +895,13 @@ public final class VirtualFileSystem {
     }
 
     private static Entry folder(String name, String childKey) {
-        return new Entry(name, true, -1L, "2024/6/12 14:30", "2024/6/12 14:30", "文件夹", "sighs", childKey, null);
+        return new Entry(name, true, -1L, "2024/6/12 14:30", "2024/6/12 14:30",
+                t("informationera.fe.folder_type"), "sighs", childKey, null);
     }
 
     private static Entry drive(String name, String childKey) {
-        return new Entry(name, true, -1L, "2024/6/12 14:30", "2024/6/12 14:30", "本地磁盘", "sighs", childKey, null);
+        return new Entry(name, true, -1L, "2024/6/12 14:30", "2024/6/12 14:30",
+                t("informationera.fe.drive_type"), "sighs", childKey, null);
     }
 
     private static Entry file(String name, long size, String modified, String type) {

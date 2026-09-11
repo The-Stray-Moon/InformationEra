@@ -69,6 +69,22 @@
     border-bottom: 3px solid var(--ore-edge);
 }
 
+.fe-titlebar-icon {
+    flex: 0 0 40px;
+    width: 40px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--ore-gold);
+    border-right: 2px solid var(--ore-edge);
+}
+
+.fe-titlebar-icon svg {
+    width: 18px;
+    height: 18px;
+}
+
 .fe-tabstrip {
     flex: 1 1 auto;
     min-width: 0;
@@ -231,10 +247,19 @@
     white-space: nowrap;
 }
 
-.fe-address-input {
-    display: none;
+.fe-address-wrap {
+    position: relative;
     flex: 1 1 auto;
     min-width: 0;
+    display: none;
+}
+
+.fe-addressbar.editing .fe-address-wrap {
+    display: block;
+}
+
+.fe-address-input {
+    width: 100%;
     height: 32px;
     padding: 5px 10px;
     border: 2px solid var(--ore-edge);
@@ -242,14 +267,41 @@
     background: var(--ore-surface-deep);
     box-shadow: inset 0 4px var(--ore-canvas);
     font-size: var(--ore-font-sm);
+    box-sizing: border-box;
 }
 
 .fe-addressbar.editing .fe-breadcrumb {
     display: none;
 }
 
-.fe-addressbar.editing .fe-address-input {
-    display: block;
+.fe-address-suggest {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    z-index: 700;
+    display: none;
+    max-height: 240px;
+    overflow: auto;
+    background: var(--ore-surface-deep);
+    border: 2px solid var(--ore-edge);
+    box-shadow: 4px 4px 0 rgba(0, 0, 0, 0.35);
+}
+
+.fe-address-suggest-item {
+    padding: 6px 12px;
+    color: var(--ore-ink);
+    font-size: var(--ore-font-sm);
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.fe-address-suggest-item:hover,
+.fe-address-suggest-item.active {
+    color: #ffffff;
+    background: var(--ore-green);
 }
 
 .fe-crumb {
@@ -595,6 +647,13 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+
+/* 内容视图：更矮的行高、更小 padding，多列表格。 */
+.ore-theme .table.fe-content-table th,
+.ore-theme .table.fe-content-table td {
+    padding: 3px 12px;
+    line-height: 24px;
 }
 
 .ore-theme .table.fe-table th {
@@ -1268,6 +1327,21 @@
     gap: 6px;
 }
 
+.fe-ghost-badge {
+    margin-left: 2px;
+    min-width: 14px;
+    height: 14px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+    font-weight: bold;
+    color: #ffffff;
+    background: var(--ore-blue);
+    border-radius: 3px;
+    padding: 0 2px;
+}
+
 .fe-drag-ghost svg {
     width: 16px;
     height: 16px;
@@ -1303,6 +1377,180 @@
     bottom: 1px;
     width: 12px;
     height: 12px;
+}
+
+/* ---------- 冲突对话框 ---------- */
+.fe-conflict-dialog {
+    position: absolute;
+    z-index: 700;
+    display: none;
+    width: 420px;
+    max-width: calc(100vw - 24px);
+    max-height: 60vh;
+    padding: 0;
+    color: var(--ore-ink);
+    background: var(--ore-surface-deep);
+    border: 3px solid var(--ore-edge);
+    box-shadow: 6px 6px 0 rgba(0, 0, 0, 0.35);
+    pointer-events: auto;
+    flex-direction: column;
+}
+
+.fe-conflict-title {
+    padding: 10px 12px;
+    color: #ffffff;
+    background: var(--ore-surface);
+    border-bottom: 2px solid var(--ore-edge);
+    font-size: var(--ore-font-md);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.fe-conflict-list {
+    flex: 1 1 auto;
+    min-height: 60px;
+    max-height: 280px;
+    overflow: auto;
+    padding: 6px 12px;
+}
+
+.fe-conflict-item {
+    padding: 6px 0;
+    color: var(--ore-ink);
+    font-size: var(--ore-font-sm);
+    border-bottom: 1px solid var(--ore-edge);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.fe-conflict-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 10px 12px;
+    border-top: 2px solid var(--ore-edge);
+}
+
+.fe-conflict-btn {
+    min-height: 28px;
+    padding: 4px 10px;
+    border: 2px solid var(--ore-edge);
+    color: var(--ore-ink);
+    background: var(--ore-surface);
+    cursor: pointer;
+    font-size: var(--ore-font-sm);
+    white-space: nowrap;
+}
+
+.fe-conflict-btn:hover {
+    color: #ffffff;
+    background: var(--ore-green);
+}
+
+.fe-conflict-btn.primary {
+    color: #ffffff;
+    background: var(--ore-blue);
+    border-color: var(--ore-blue);
+}
+
+.fe-conflict-btn.danger {
+    color: #ffffff;
+    background: var(--ore-red);
+    border-color: var(--ore-red);
+}
+
+/* ---------- 属性对话框 ---------- */
+.fe-properties-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    z-index: 750;
+    display: none;
+    pointer-events: auto;
+    background: rgba(0, 0, 0, 0.35);
+}
+
+.fe-properties-dialog {
+    position: absolute;
+    z-index: 760;
+    display: none;
+    width: 380px;
+    max-width: calc(100vw - 24px);
+    color: var(--ore-ink);
+    background: var(--ore-surface-deep);
+    border: 3px solid var(--ore-edge);
+    box-shadow: 6px 6px 0 rgba(0, 0, 0, 0.35);
+    pointer-events: auto;
+    flex-direction: column;
+}
+
+.fe-properties-titlebar {
+    display: flex;
+    align-items: center;
+    height: 32px;
+    padding: 0 6px 0 12px;
+    background: var(--ore-surface);
+    border-bottom: 2px solid var(--ore-edge);
+}
+
+.fe-properties-title {
+    flex: 1 1 auto;
+    color: #ffffff;
+    font-size: var(--ore-font-md);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.fe-properties-close {
+    flex: 0 0 26px;
+    width: 26px;
+    height: 26px;
+    border: 0;
+    color: #ffffff;
+    background: transparent;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.fe-properties-close:hover {
+    background: var(--ore-red);
+}
+
+.fe-properties-close svg {
+    width: 12px;
+    height: 12px;
+}
+
+.fe-properties-content {
+    padding: 12px;
+    max-height: 60vh;
+    overflow: auto;
+    font-size: var(--ore-font-sm);
+}
+
+.fe-properties-row {
+    display: flex;
+    gap: 8px;
+    padding: 4px 0;
+    border-bottom: 1px solid var(--ore-edge);
+}
+
+.fe-properties-label {
+    flex: 0 0 96px;
+    color: var(--ore-ink-muted);
+}
+
+.fe-properties-value {
+    flex: 1 1 auto;
+    color: var(--ore-ink);
+    word-break: break-all;
 }
 
 /* ---------- 重命名输入框 ---------- */

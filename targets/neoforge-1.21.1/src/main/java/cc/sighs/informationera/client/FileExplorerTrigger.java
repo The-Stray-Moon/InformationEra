@@ -117,6 +117,9 @@ public final class FileExplorerTrigger {
         } else {
             // 点击直接显示并固定预览，不因 hover 取消而消失。
             previewPinned = true;
+            // 清掉 hover 遗留的 show/hide 定时器，避免点击唤起后被延迟隐藏。
+            cancelPreviewShow();
+            cancelHidePreview();
             showPreview();
         }
     }

@@ -24,6 +24,8 @@ public final class FileExplorerCursor {
     private static long hresize;
     private static long vresize;
     private static long resizeAll;
+    private static long crosshair;
+    private static long notAllowed;
 
     private FileExplorerCursor() {
     }
@@ -39,7 +41,10 @@ public final class FileExplorerCursor {
         }
         ensureCursors();
         Position mouse = Operation.getMousePositionDirectly();
-        String kind = mouse == null ? null : FileExplorerWindow.resolveCursorKind(mouse);
+        String kind = FileExplorerWindow.getDragCursorKind();
+        if (kind == null) {
+            kind = mouse == null ? null : FileExplorerWindow.resolveCursorKind(mouse);
+        }
         long handle = handleFor(kind);
         if (handle != 0L) {
             GLFW.glfwSetCursor(mc.getWindow().getWindow(), handle);
@@ -56,6 +61,9 @@ public final class FileExplorerCursor {
             case "nwse" -> resizeAll;
             case "pointer" -> hand;
             case "text" -> ibeam;
+            case "copy" -> crosshair;
+            case "link" -> crosshair;
+            case "notallowed" -> notAllowed;
             default -> arrow;
         };
     }
@@ -70,5 +78,12 @@ public final class FileExplorerCursor {
         hresize = GLFW.glfwCreateStandardCursor(GLFW.GLFW_HRESIZE_CURSOR);
         vresize = GLFW.glfwCreateStandardCursor(GLFW.GLFW_VRESIZE_CURSOR);
         resizeAll = GLFW.glfwCreateStandardCursor(GLFW.GLFW_RESIZE_ALL_CURSOR);
+        crosshair = GLFW.glfwCreateStandardCursor(GLFW.GLFW_CROSSHAIR_CURSOR);
+        notAllowed = GLFW.glfwCreateStandardCursor(GLFW.GLFW_NOT_ALLOWED_CURSOR);
+    }
+
+    /** 供拖拽引擎设置临时光标类型（拖拽激活期间覆盖 hitTest 结果）。 */
+    public static void setDragCursorKind(String kind) {
+        FileExplorerWindow.setDragCursorKind(kind);
     }
 }

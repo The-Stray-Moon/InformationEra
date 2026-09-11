@@ -21,6 +21,10 @@ public final class ExplorerSession {
     public static final Deque<Runnable> undoStack = new ArrayDeque<>();
     public static final Deque<Runnable> redoStack = new ArrayDeque<>();
 
+    /** 全局前进/后退栈（跨窗口共享）。 */
+    public static final Deque<String> globalBackStack = new ArrayDeque<>();
+    public static final Deque<String> globalForwardStack = new ArrayDeque<>();
+
     private ExplorerSession() {
     }
 

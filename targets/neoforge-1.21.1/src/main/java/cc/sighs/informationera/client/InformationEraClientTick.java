@@ -17,6 +17,7 @@ public final class InformationEraClientTick {
     public static void onClientTick(ClientTickEvent.Post event) {
         FileExplorerTrigger.tick();
         FileExplorerWindow.dragTick();
+        FileExplorerWindow.tabDragTick();
         while (InformationEraClientEvents.OPEN_FILE_EXPLORER.consumeClick()) {
             FileExplorerWindow.open();
         }
