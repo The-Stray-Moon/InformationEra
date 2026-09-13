@@ -20,7 +20,10 @@
     background: transparent;
     pointer-events: none;
     user-select: none;
-    transform: translateZ(10);
+    /* Document 之间的前后顺序由 translateZ 决定（z-index 跨不了 Document）。
+       资源管理器窗口必须浮在普通 HUD 之上，下界与 FileExplorerWindow.BASE_Z 保持一致；
+       多窗口时由 Java 侧把它们抬到 500 以上区分前后。 */
+    transform: translateZ(500px);
 }
 
 /* 拖拽/框选期间的全局鼠标捕获层。 */
@@ -439,7 +442,9 @@
     flex: 0 0 auto;
     width: 240px;
     min-width: 0;
-    overflow: auto;
+    /* 只纵向滚动：横向靠 .fe-nav-label 的省略号收住，否则长名称会撑出横向滚动条。 */
+    overflow-x: hidden;
+    overflow-y: auto;
     padding: 6px 0;
     background: var(--ore-surface-deep);
     border-right: 3px solid var(--ore-edge);
@@ -577,6 +582,13 @@
     white-space: nowrap;
 }
 
+/* 导航树各段之间的分割线：快速访问 / 最近使用 / 主目录 / 回收站彼此隔开。 */
+.fe-nav-sep {
+    height: 1px;
+    margin: 6px 8px;
+    background: var(--ore-edge);
+}
+
 .fe-nav-item {
     min-height: 32px;
     padding: 0 8px;
@@ -607,6 +619,9 @@
 }
 
 .fe-nav-label {
+    /* flex 子项默认 min-width:auto 不会收缩，长名称会撑破行；必须显式置 0 才能出省略号。 */
+    flex: 1 1 auto;
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -913,6 +928,27 @@
     height: 16px;
 }
 
+/* 物品图标：真实物品由 <item> 绘制，这里只负责占位尺寸与居中。
+   <item> 没有固有尺寸，必须由宿主元素给出宽高，否则异步资源就绪后布局会跳。 */
+.fe-item-icon {
+    display: inline-flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: center;
+    line-height: 0;
+    vertical-align: middle;
+}
+
+.fe-item-icon > item {
+    display: block;
+    width: 100%;
+    height: 100%;
+}
+
+.fe-cell > .fe-item-icon {
+    flex: 0 0 16px;
+}
+
 .fe-name-text {
     overflow: hidden;
     text-overflow: ellipsis;
@@ -981,6 +1017,13 @@
     gap: 4px;
     padding: 8px;
 }
+
+/* 平铺视图的列宽随「查看」档位变化，与 tileIconSize() 的图标尺寸配套，
+   否则切到大图标时图标会挤在同一列宽里。 */
+.fe-content.fe-view-small .fe-tiles { grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
+.fe-content.fe-view-medium .fe-tiles { grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+.fe-content.fe-view-large .fe-tiles { grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
+.fe-content.fe-view-xlarge .fe-tiles { grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); }
 
 .fe-tile-item {
     display: flex;

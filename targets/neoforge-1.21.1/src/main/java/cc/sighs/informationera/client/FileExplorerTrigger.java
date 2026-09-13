@@ -196,7 +196,9 @@ public final class FileExplorerTrigger {
             return;
         }
         Minecraft mc = Minecraft.getInstance();
-        boolean show = mc.level != null || mc.screen != null;
+        // 只在真正进入世界后显示。不能用 screen != null 判断——标题界面、创建世界界面
+        // 本身都是 Screen，那样会在主菜单上就冒出这个按钮。
+        boolean show = mc.level != null && mc.player != null;
         button.setInlineStyleProperty("display", show ? "block" : "none");
 
         if (badge != null) {
@@ -208,6 +210,11 @@ public final class FileExplorerTrigger {
                 badge.setInlineStyleProperty("display", "none");
             }
         }
+    }
+
+    /** 服务端状态刷新后重新渲染任务标（窗口数与徽标可能变化）。 */
+    public static void refreshTaskbar() {
+        updateTaskbar();
     }
 
     public static Document getDocument() {

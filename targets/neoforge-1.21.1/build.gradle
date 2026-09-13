@@ -40,6 +40,16 @@ neoForge {
     }
 }
 
+// 把 common 的 class 输出并入本 target 的 main sourceSet 输出。
+// 这是必需的：moddev 只会把 sourceSet 的输出放进 mod 的运行时 classpath，
+// 而 `implementation project(':common')` 只保证编译期可见——少了这一句，
+// 运行时一碰 common 的类就会 NoClassDefFoundError（开发环境尤其明显）。
+// 同时也让 final jar 自动包含 common 的 class，无需再手工 from(...)。
+sourceSets.main.output.dir(
+        project(':common').layout.buildDirectory.dir('classes/java/main'),
+        builtBy: ':common:classes'
+)
+
 repositories {
     mavenCentral()
     maven { url = 'https://maven.sighs.cc/repository/maven-public/' }
@@ -66,10 +76,6 @@ tasks.named('processResources', ProcessResources).configure {
     filesMatching('META-INF/neoforge.mods.toml') {
         expand replaceProperties + [project: project]
     }
-}
-
-tasks.named('jar', Jar).configure {
-    from project(':common').sourceSets.main.output
 }
 
 tasks.withType(JavaCompile).configureEach {

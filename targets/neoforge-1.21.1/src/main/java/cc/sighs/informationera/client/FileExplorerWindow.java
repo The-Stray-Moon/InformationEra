@@ -6,11 +6,14 @@ import com.sighs.apricityui.init.Element;
 import com.sighs.apricityui.layout.Position;
 import com.sighs.apricityui.render.DocumentLayerOrder;
 import com.sighs.apricityui.render.Operation;
+import net.minecraft.world.inventory.Slot;
 
 import static cc.sighs.informationera.client.FileExplorerText.t;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * 多窗口文件资源管理器。
@@ -25,9 +28,17 @@ public final class FileExplorerWindow {
     private static final String TEMPLATE = "screens/file-explorer.html";
 
     private static final List<FileExplorerController> windows = new ArrayList<>();
-    private static final List<String> recentPaths = new ArrayList<>();
+    private static final Set<String> cutIds = new HashSet<>();
     private static VirtualFileSystem fs;
-    private static int zCounter = 10;
+    /**
+     * 每个资源管理器窗口对应的 Document 层叠下限。
+     *
+     * <p>AUI 用 body 的 {@code translateZ} 决定 Document 之间的前后顺序（z-index 跨不了
+     * Document），资源管理器窗口必须浮在普通 HUD/Overlay 之上，本体样式里也写了同样的值。
+     * 这里从一个 ≥50 的基数开始自增，避免聚焦时反而把窗口降下去。
+     */
+    private static final int BASE_Z = 50;
+    private static int zCounter = BASE_Z;
     private static FileExplorerController focusedController;
 
     /** 跨窗口拖拽的全局状态（坐标均使用 AUI 屏幕坐标）。 */
@@ -69,7 +80,10 @@ public final class FileExplorerWindow {
         controller.mount(document);
         windows.add(controller);
         FileExplorerController.setActive(controller);
+        DiskClient.setAnyWindowOpen(true);
         focus(controller);
+        // 向服务端要一次权威状态，界面先用空盘渲染、状态到达后自动刷新。
+        DiskClient.open();
     }
 
     /** 打开新窗口并定位到指定路径。 */
@@ -91,12 +105,19 @@ public final class FileExplorerWindow {
         FileExplorerController.setActive(controller);
     }
 
+    /**
+     * 设置窗口的 Document 层叠值。
+     *
+     * <p>传入值会被夹到 {@link #BASE_Z} 以上：资源管理器窗口不允许掉到 50 以下，
+     * 否则会被其它 Overlay 盖住。
+     */
     private static void setZ(FileExplorerController controller, int z) {
         Document document = controller.document();
         if (document == null || document.body == null) {
             return;
         }
-        document.body.setInlineStyleProperty("transform", "translateZ(" + z + "px)");
+        int value = Math.max(BASE_Z, z) + 500;
+        document.body.setInlineStyleProperty("transform", "translateZ(" + value + "px)");
     }
 
     /** 当前聚焦的窗口，无窗口返回 null。 */
@@ -107,20 +128,13 @@ public final class FileExplorerWindow {
         return windows.isEmpty() ? null : windows.get(windows.size() - 1);
     }
 
-    /** 记录最近访问路径（去重，最近在前）。 */
+    /** 记录最近访问路径（去重，最近在前）。写入客户端配置，重启后仍在。 */
     public static void recordRecentPath(String key) {
-        if (key == null) {
-            return;
-        }
-        recentPaths.remove(key);
-        recentPaths.add(0, key);
-        if (recentPaths.size() > 15) {
-            recentPaths.remove(recentPaths.size() - 1);
-        }
+        ExplorerPreferences.recordRecent(key);
     }
 
     public static List<String> getRecentPaths() {
-        return recentPaths;
+        return ExplorerPreferences.recent();
     }
 
     /** 任务标右键的 Jump List：打开新窗口 / 最近路径。 */
@@ -132,10 +146,11 @@ public final class FileExplorerWindow {
         StringBuilder sb = new StringBuilder();
         sb.append("<div class=\"fe-jump-item\" data-action=\"new\">").append(t("informationera.fe.open_new_window")).append("</div>");
         sb.append("<div class=\"fe-jump-sep\"></div>");
-        if (recentPaths.isEmpty()) {
+        List<String> recent = ExplorerPreferences.recent();
+        if (recent.isEmpty()) {
             sb.append("<div class=\"fe-jump-item fe-jump-disabled\">").append(t("informationera.fe.no_recent")).append("</div>");
         } else {
-            for (String key : recentPaths) {
+            for (String key : recent) {
                 VirtualFileSystem.Folder folder = fs != null ? fs.folder(key) : null;
                 String label = folder != null ? folder.name : key;
                 sb.append("<div class=\"fe-jump-item\" data-path=\"").append(FileExplorerController.escape(key))
@@ -238,9 +253,23 @@ public final class FileExplorerWindow {
         if (dragSource == controller) {
             cancelDrag();
         }
+        DiskClient.setAnyWindowOpen(!windows.isEmpty());
         if (!windows.isEmpty()) {
             focus(windows.get(windows.size() - 1));
         }
+    }
+
+    /**
+     * 关闭全部窗口。离开世界时调用：窗口是挂在世界里的常驻 Overlay，
+     * 不主动收掉的话回到主菜单还会悬在标题界面上。
+     */
+    public static void closeAll() {
+        cancelDrag();
+        for (FileExplorerController controller : new ArrayList<>(windows)) {
+            controller.closeWindow();
+        }
+        windows.clear();
+        DiskClient.setAnyWindowOpen(false);
     }
 
     /** 刷新所有窗口的显示（供跨窗口撤销/重做等全局变更后调用）。 */
@@ -260,6 +289,51 @@ public final class FileExplorerWindow {
 
     public static VirtualFileSystem getFs() {
         return fs;
+    }
+
+    /** 当前被剪切的节点 id 集合，供视图重建时保留虚化状态。 */
+    public static Set<String> cutIds() {
+        return cutIds;
+    }
+
+    /**
+     * 用服务端推回的权威视图替换客户端视图，并刷新所有已打开窗口。
+     *
+     * <p>客户端不做增量修改：每次状态到达都整体换掉视图再重绘，保证界面与服务端一致。
+     */
+    public static void applyView(VirtualFileSystem view) {
+        if (view == null) {
+            return;
+        }
+        fs = view;
+        // 磁盘被重置过时，配置里可能残留已不存在的路径。
+        // 只在磁盘确实有内容时清理——空盘（状态未到 / 全新玩家）不能当作「路径都失效」，
+        // 否则会把玩家的固定项和最近记录一次清空。
+        if (view.folder(cc.sighs.informationera.disk.DiskFolder.ROOT_ID) != null
+                && !view.folder(cc.sighs.informationera.disk.DiskFolder.ROOT_ID).entries.isEmpty()) {
+            ExplorerPreferences.pruneUnknown(key -> view.folder(key) != null);
+        }
+        for (FileExplorerController controller : new ArrayList<>(windows)) {
+            controller.onViewReplaced(view);
+        }
+        FileExplorerTrigger.refreshTaskbar();
+    }
+
+    /** 重新请求一次服务端状态（打开窗口、刷新等场景）。 */
+    public static void requestState() {
+        DiskClient.open();
+    }
+
+    /**
+     * 每客户端 tick 校验所有窗口的悬停提示是否还该显示。
+     *
+     * <p>提示框的隐藏原来只依赖条目的 mouseout，条目被重渲染或鼠标移出窗口时都不会触发，
+     * 于是提示会卡在屏幕上。这里统一兜底。
+     */
+    public static void tooltipTick() {
+        for (FileExplorerController controller : new ArrayList<>(windows)) {
+            controller.tickTooltip();
+        }
     }
 
     /** 右键拖拽是否正在进行（用于抑制拖拽期间的右键菜单）。 */
@@ -544,58 +618,106 @@ public final class FileExplorerWindow {
         finishDrag(screenX, screenY);
     }
 
+    /**
+     * 松开鼠标时决定这次拖拽的归属。
+     *
+     * <p>**顺序是关键**：先看鼠标是不是还在某个资源管理器窗口上。只要在窗口上，
+     * 就完全按窗口内的拖拽处理，绝不去碰底下的容器槽位——否则鼠标明明还在窗口里、
+     * 底下恰好有槽位，就会穿透过去把物品取出来。
+     *
+     * <p>只有当鼠标确实落在窗口之外时，才考虑「拖到容器槽位取出物品」。
+     */
     private static void finishDrag(double screenX, double screenY) {
         DropTarget target = resolveDropTarget(screenX, screenY);
-        if (dragRight) {
-            if (target != null) {
+
+        // 鼠标仍停在资源管理器窗口上：按窗口内拖拽处理，不做任何槽位操作。
+        if (target != null) {
+            if (dragRight) {
                 // 只有成功打开 drop 菜单才抑制紧随的 contextmenu。
                 target.controller.showExternalDropMenu(dragEntries, dragSourceKey, target.key,
                         new Position(screenX, screenY), dragSource);
                 suppressNextContextMenu = true;
-            }
-            // target == null：不抑制，让 contextmenu 正常弹普通右键菜单。
-        } else if (target != null) {
-            boolean alt = Operation.isKeyPressed("key.keyboard.left.alt")
-                    || Operation.isKeyPressed("key.keyboard.right.alt");
-            boolean ctrl = Operation.isKeyPressed("key.keyboard.left.control")
-                    || Operation.isKeyPressed("key.keyboard.right.control");
-            boolean moved;
-            if (alt) {
-                moved = dragSource.createShortcuts(dragSourceKey, dragEntries, target.key);
-            } else if (ctrl) {
-                moved = dragSource.moveOrCopy(dragSourceKey, dragEntries, target.key, true);
             } else {
-                boolean crossDrive = isCrossDrive(dragSourceKey, target.key);
-                moved = dragSource.moveOrCopy(dragSourceKey, dragEntries, target.key, crossDrive);
+                boolean alt = Operation.isKeyPressed("key.keyboard.left.alt")
+                        || Operation.isKeyPressed("key.keyboard.right.alt");
+                boolean ctrl = Operation.isKeyPressed("key.keyboard.left.control")
+                        || Operation.isKeyPressed("key.keyboard.right.control");
+                boolean moved;
+                if (alt) {
+                    moved = dragSource.createShortcuts(dragSourceKey, dragEntries, target.key);
+                } else if (ctrl) {
+                    moved = dragSource.moveOrCopy(dragSourceKey, dragEntries, target.key, true);
+                } else {
+                    boolean crossDrive = isCrossDrive(dragSourceKey, target.key);
+                    moved = dragSource.moveOrCopy(dragSourceKey, dragEntries, target.key, crossDrive);
+                }
+                if (moved && target.controller != dragSource) {
+                    target.controller.refreshAfterExternal();
+                }
             }
-            if (moved && target.controller != dragSource) {
-                target.controller.refreshAfterExternal();
+            cancelDrag();
+            return;
+        }
+
+        // 鼠标不在任何资源管理器窗口上：这时才轮到容器槽位。
+        if (!dragRight && dragEntries != null && !dragEntries.isEmpty()
+                && !pointerOverAnyExplorerWindow(screenX, screenY)) {
+            Slot slot = ContainerSlotInterop.slotAt(screenX, screenY);
+            if (slot != null) {
+                withdrawIntoSlot(slot);
             }
         }
         cancelDrag();
     }
 
-    /** 判断 sourceKey 与 targetKey 是否跨越不同“磁盘”（thispc/C 与 thispc/D/E 互跨）。 */
-    private static boolean isCrossDrive(String sourceKey, String targetKey) {
-        String s = driveOf(sourceKey);
-        String t = driveOf(targetKey);
-        return s != null && t != null && !s.equals(t);
+    /**
+     * 鼠标是否落在任一资源管理器窗口的可见区域上（含标题栏、工具栏、空白处，不限于内容区）。
+     *
+     * <p>与 {@link #resolveDropTarget} 的区别：那个只认「可放置的落点」（文件夹行或内容区），
+     * 这里认整个窗口。松手时用它来确保鼠标还在窗口里就绝不穿透到底下的容器。
+     */
+    private static boolean pointerOverAnyExplorerWindow(double screenX, double screenY) {
+        Position screenPos = new Position(screenX, screenY);
+        List<Document> layered = DocumentLayerOrder.frontToBack(Document.getAll());
+        if (layered == null) {
+            return false;
+        }
+        for (Document document : layered) {
+            FileExplorerController controller = controllerFor(document);
+            if (controller == null || !controller.isOpen()) {
+                continue;
+            }
+            if (controller.hitsOwnWindow(screenPos)) {
+                return true;
+            }
+        }
+        return false;
     }
 
-    private static String driveOf(String key) {
-        if (key == null) {
-            return null;
+    /**
+     * 把拖过来的文件取出到目标槽位。
+     *
+     * <p>一次拖拽只处理第一个物品条目：数量由服务端按槽位剩余空间决定
+     * （不可堆叠物品就是 1 个），超出部分留在磁盘。
+     */
+    private static void withdrawIntoSlot(Slot slot) {
+        for (VirtualFileSystem.Entry entry : dragEntries) {
+            if (entry == null || entry.folder || entry.itemKey == null) {
+                continue;
+            }
+            DiskClient.withdraw(entry.itemKey, slot.index, slot.getMaxStackSize());
+            return;
         }
-        if (key.equals("thispc/C") || key.startsWith("thispc/C/")) {
-            return "C";
-        }
-        if (key.equals("thispc/D") || key.startsWith("thispc/D/")) {
-            return "D";
-        }
-        if (key.equals("thispc/E") || key.startsWith("thispc/E/")) {
-            return "E";
-        }
-        return null;
+    }
+
+    /**
+     * 当前拖拽是「移动到目标文件夹」还是「复制引用」。
+     *
+     * <p>磁盘模型里已经没有多个分区（一切都在同一个玩家的磁盘内），因此默认就是移动；
+     * 复制由 Ctrl 显式触发。保留这个方法是为了不牵动 finishDrag 的分支结构。
+     */
+    private static boolean isCrossDrive(String sourceKey, String targetKey) {
+        return false;
     }
 
     private static DropTarget resolveDropTarget(double screenX, double screenY) {

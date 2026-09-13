@@ -1,5 +1,7 @@
 package cc.sighs.informationera.client;
 
+import cc.sighs.informationera.util.ItemStacks;
+import com.sighs.apricityui.element.Item;
 import com.sighs.apricityui.event.Event;
 import com.sighs.apricityui.event.KeyEvent;
 import com.sighs.apricityui.event.MouseEvent;
@@ -7,7 +9,10 @@ import com.sighs.apricityui.init.Document;
 import com.sighs.apricityui.init.Element;
 import com.sighs.apricityui.layout.Position;
 import com.sighs.apricityui.layout.Size;
+import cc.sighs.informationera.disk.DiskFolder;
 import net.minecraft.client.Minecraft;
+import net.minecraft.core.HolderLookup;
+import net.minecraft.world.item.ItemStack;
 
 import static cc.sighs.informationera.client.FileExplorerText.t;
 
@@ -40,10 +45,6 @@ public final class FileExplorerController {
     /** 虚拟滚动缓冲行数。 */
     private static final int VIRTUAL_BUFFER = 12;
 
-    private static final List<String> SIDEBAR_ROOTS = List.of(
-            "home", "desktop", "downloads", "documents", "pictures", "music", "videos",
-            "onedrive", "thispc", "thispc/libraries", "thispc/network", "recyclebin");
-
     private static final String[] COL_FIELDS = {"name", "modified", "type", "size", "created", "author"};
 
     private static String[] columnLabels() {
@@ -57,7 +58,7 @@ public final class FileExplorerController {
     /** 每个标签页独立的状态。 */
     static final class Tab {
         String title = t("informationera.fe.title");
-        String currentKey = "home";
+        String currentKey = DiskFolder.ROOT_ID;
         final Deque<String> backStack = new ArrayDeque<>();
         final Deque<String> forwardStack = new ArrayDeque<>();
         final Set<VirtualFileSystem.Entry> selected = new HashSet<>();
@@ -71,13 +72,22 @@ public final class FileExplorerController {
         int lastClickedIndex = -1;
     }
 
-    private final VirtualFileSystem fs;
+    /**
+     * 当前视图模型。
+     *
+     * <p>这个引用**会被替换**：服务端每次推回权威状态都会生成一个新的
+     * {@code VirtualFileSystem}，本窗口必须切到新实例上，否则会一直渲染最初那张空盘。
+     * 所以这里的字段不能是 final，改由 {@link #onViewReplaced} 更新。
+     */
+    private VirtualFileSystem fs;
     private Document document;
 
     private Element window;
     private Element capture;
     private Element selectionRect;
     private Element tooltip;
+    /** 提示框当前是否可见。用来让 {@link #tickTooltip()} 只在需要时做校验。 */
+    private boolean tooltipVisible;
     private Element dragGhost;
 
     final List<Tab> tabs = new ArrayList<>();
@@ -94,13 +104,14 @@ public final class FileExplorerController {
     private double restoreW;
     private double restoreH;
 
-    private String currentKey = "home";
+    private String currentKey = DiskFolder.ROOT_ID;
     private final Set<VirtualFileSystem.Entry> selected = new HashSet<>();
     private final Set<VirtualFileSystem.Entry> checkedSet = new HashSet<>();
     private int lastCheckedIndex = -1;
     private final List<VirtualFileSystem.Entry> renderedEntryList = new ArrayList<>();
     private final Set<String> expandedSidebar = new HashSet<>();
-    private final Set<String> pinned = new HashSet<>();
+    // 「固定到快速访问」的状态存在客户端配置里（ExplorerPreferences），不放在窗口实例上——
+    // 否则关掉窗口、重启客户端就全丢了。
     private final List<Double> columnWidths = new ArrayList<>(List.of(320.0, 160.0, 120.0, 100.0, 140.0, 100.0));
     private final boolean[] columnVisible = new boolean[]{true, true, true, true, false, false};
 
@@ -222,6 +233,7 @@ public final class FileExplorerController {
     }
 
     public void closeWindow() {
+        hideTooltip();
         closeContextMenu();
         FileExplorerWindow.unregister(this);
         if (document != null) {
@@ -614,22 +626,74 @@ public final class FileExplorerController {
     }
 
     /** 去掉页面级 intercept meta 后，手动拦截窗口上的原生输入。 */
+    /**
+     * 阻止原生鼠标事件穿透到游戏。
+     *
+     * <h2>为什么不用 {@code aui-mouse-events: intercept}</h2>
+     * 那个 meta 是**整页开关**：打开后凡是命中页面的输入都被消费。而资源管理器是铺满
+     * 整屏的 Overlay（{@code 100vw × 100vh}），于是整个屏幕的点击都不再传给底下的容器，
+     * 槽位就完全点不到了。
+     *
+     * <p>所以这里改成**逐事件判断**：只有当事件确实落在窗口本体上时才消费，
+     * 落在窗口之外（铺满屏幕但透明的页面根）就放行给原版界面。
+     *
+     * <p>判定用 {@code e.target}——AUI 的事件派发已经按层级命中测试选好了目标元素，
+     * 直接问「这个目标是不是窗口的一部分」比再做一次坐标换算更准。
+     */
     private void bindNativeInterception() {
         if (document == null) {
             return;
         }
-        // 整个窗口 document 都拦截鼠标事件，阻止传递给原版 Screen。
         for (String type : new String[]{"mousedown", "mouseup", "click", "dblclick", "wheel", "contextmenu", "mousemove"}) {
             document.addEventListener(type, e -> {
-                if (e instanceof MouseEvent me) {
-                    // 输入框需要原生鼠标事件来定位光标，不拦截。
-                    if (e.target instanceof Element target && target.closest("input") != null) {
-                        return;
-                    }
-                    me.consumeNative();
+                if (!(e instanceof MouseEvent me)) {
+                    return;
                 }
+                if (!(me.target instanceof Element target)) {
+                    return;
+                }
+                // 输入框需要原生鼠标事件来定位光标，不拦截。
+                if (target.closest("input") != null) {
+                    return;
+                }
+                // 目标落在窗口本体（含其各种浮层）上才消费；否则放行给原版 Screen。
+                if (!isWindowElement(target)) {
+                    return;
+                }
+                me.consumeNative();
             });
         }
+    }
+
+    /**
+     * 给定的屏幕坐标是否落在本窗口的可见区域上。
+     *
+     * <p>供跨窗口拖拽在松手时判断「鼠标是否还在资源管理器上」：只要还在，就绝不把
+     * 这次拖拽当成「拖到容器槽位」，避免穿透到底下的容器界面。
+     */
+    boolean hitsOwnWindow(Position screenPos) {
+        if (document == null || !document.isActive() || screenPos == null) {
+            return false;
+        }
+        Position p = document.screenToDocumentPosition(screenPos);
+        if (p == null) {
+            return false;
+        }
+        Element hit = document.hitTest(p);
+        return hit != null && isWindowElement(hit);
+    }
+
+    /** 命中元素是否属于资源管理器窗口本体（含它的各种浮层）。 */
+    private static boolean isWindowElement(Element hit) {
+        // 窗口本体、以及挂在其下的所有 UI（标题栏/工具栏/内容区/菜单/对话框）都算命中。
+        return hit.closest(".fe") != null
+                || hit.closest(".fe-ctx-menu") != null
+                || hit.closest(".fe-conflict-dialog") != null
+                || hit.closest(".fe-properties-dialog") != null
+                || hit.closest(".fe-selection-rect") != null
+                || hit.closest(".fe-tooltip") != null
+                || hit.closest(".fe-rename-input") != null
+                || hit.closest(".fe-drag-ghost") != null;
     }
 
     /** 键盘快捷键（当键盘事件能到达本 Overlay 时生效）。 */
@@ -899,10 +963,7 @@ public final class FileExplorerController {
 
     private List<String> allFolderKeys() {
         List<String> result = new ArrayList<>();
-        collectFolderKeys(result, "home");
-        collectFolderKeys(result, "thispc");
-        collectFolderKeys(result, "onedrive");
-        collectFolderKeys(result, "recyclebin");
+        collectFolderKeys(result, cc.sighs.informationera.disk.DiskFolder.ROOT_ID);
         return result;
     }
 
@@ -1021,35 +1082,32 @@ public final class FileExplorerController {
             return null;
         }
 
+        // 现在只有一块磁盘：第一个名字要么是盘名/盘根别名，要么是根下的一个文件夹。
         String key;
         String first = names.get(0);
-        if (first.equalsIgnoreCase("此电脑") || first.equalsIgnoreCase("我的电脑") || first.equalsIgnoreCase("thispc")) {
-            key = "thispc";
-        } else if (first.equalsIgnoreCase("主文件夹") || first.equalsIgnoreCase("home")) {
-            key = "home";
+        // 根目录的显示名就是玩家名字，所以任何以玩家名开头的路径都指向盘根。
+        // 另外保留几个通用别名，方便玩家直接敲。
+        String rootName = fs.diskName();
+        if ((rootName != null && !rootName.isEmpty() && first.equalsIgnoreCase(rootName))
+                || first.equalsIgnoreCase("信息磁盘")
+                || first.equalsIgnoreCase("此电脑")
+                || first.equalsIgnoreCase("我的电脑")
+                || first.equalsIgnoreCase("disk")
+                || first.equalsIgnoreCase("root")
+                || first.equals("/")) {
+            key = DiskFolder.ROOT_ID;
         } else if (first.equalsIgnoreCase("回收站") || first.equalsIgnoreCase("recyclebin")) {
-            key = "recyclebin";
-        } else if (first.equalsIgnoreCase("桌面") || first.equalsIgnoreCase("desktop")) {
-            key = "desktop";
-        } else if (first.equalsIgnoreCase("下载") || first.equalsIgnoreCase("downloads")) {
-            key = "downloads";
-        } else if (first.equalsIgnoreCase("文档") || first.equalsIgnoreCase("documents")) {
-            key = "documents";
-        } else if (first.equalsIgnoreCase("图片") || first.equalsIgnoreCase("pictures")) {
-            key = "pictures";
-        } else if (first.equalsIgnoreCase("音乐") || first.equalsIgnoreCase("music")) {
-            key = "music";
-        } else if (first.equalsIgnoreCase("视频") || first.equalsIgnoreCase("videos")) {
-            key = "videos";
-        } else if (first.equalsIgnoreCase("onedrive")) {
-            key = "onedrive";
+            key = DiskFolder.RECYCLE_ID;
         } else {
-            // 相对当前目录的简单名。
+            // 相对当前目录的简单名；不行再从根下找。
             String resolved = fs.resolve(first);
             if (resolved != null) {
                 key = resolved;
             } else {
                 key = findChild(currentKey, first);
+                if (key == null) {
+                    key = findChild(DiskFolder.ROOT_ID, first);
+                }
             }
         }
 
@@ -1611,6 +1669,7 @@ public final class FileExplorerController {
             restoreH = windowHeight;
             minimized = true;
             // 最小化：直接隐藏整个窗口，只保留任务栏任务标。
+            hideTooltip();
             window.setInlineStyleProperty("display", "none");
         } else {
             minimized = false;
@@ -1761,62 +1820,72 @@ public final class FileExplorerController {
     /** 实际执行批量移动/复制。replaceNames 指定要替换的冲突名，skipNames 指定要跳过的冲突名。 */
     private boolean performMoveOrCopy(String sourceKey, List<VirtualFileSystem.Entry> entries, String targetKey,
                                       boolean copy, List<String> replaceNames, List<String> skipNames) {
-        boolean any = false;
-        List<Runnable> undos = new ArrayList<>();
+        List<String> ids = new ArrayList<>();
         int count = 0;
         for (VirtualFileSystem.Entry entry : entries) {
             boolean conflict = fs.hasName(targetKey, entry.name);
-            if (conflict && skipNames.contains(entry.name)) {
+            if (conflict && !replaceNames.contains(entry.name)) {
+                // 冲突且未选择替换：跳过（含显式跳过）。
                 continue;
             }
-            if (conflict && replaceNames.contains(entry.name)) {
-                Runnable undo = fs.replace(targetKey, entry, copy, sourceKey);
-                if (undo != null) {
-                    undos.add(undo);
-                    any = true;
-                    count++;
-                }
-                continue;
-            }
-            if (conflict) {
-                continue;
-            }
-            if (copy) {
-                undos.add(fs.duplicateInto(targetKey, entry));
-            } else {
-                undos.add(fs.move(sourceKey, targetKey, entry));
-            }
-            any = true;
+            ids.add(entry.id);
             count++;
         }
-        if (!any) {
+        if (ids.isEmpty()) {
             return false;
         }
-        pushUndo(() -> undos.forEach(Runnable::run));
-        afterMutation();
+        // 变更只在服务端执行；这里只发意图，状态回来后再刷新界面。
+        if (copy) {
+            DiskClient.copy(ids, targetKey);
+        } else {
+            DiskClient.move(ids, targetKey);
+        }
         setStatus(copy ? t("informationera.fe.status_copied_to", count) : t("informationera.fe.status_moved", count));
         return true;
     }
 
-    /** 拖拽创建快捷方式到目标文件夹。 */
+    /** 拖拽到目标文件夹：快捷方式概念已取消，「按住 Alt 拖动」改为复制引用。 */
     boolean createShortcuts(String sourceKey, List<VirtualFileSystem.Entry> entries, String targetKey) {
-        List<Runnable> undos = new ArrayList<>();
-        int count = 0;
+        List<String> ids = new ArrayList<>();
         for (VirtualFileSystem.Entry entry : entries) {
-            undos.add(fs.createShortcut(targetKey, sourceKey, entry));
-            count++;
+            ids.add(entry.id);
         }
-        if (count == 0) {
+        if (ids.isEmpty()) {
             return false;
         }
-        pushUndo(() -> undos.forEach(Runnable::run));
-        afterMutation();
-        setStatus(t("informationera.fe.status_shortcuts_created", count));
+        DiskClient.copy(ids, targetKey);
+        setStatus(t("informationera.fe.status_copied_to", ids.size()));
         return true;
     }
 
     /** 其它窗口发生了文件变更，刷新本窗口的显示。 */
     void refreshAfterExternal() {
+        afterMutation();
+    }
+
+    /**
+     * 服务端推回了新的权威视图：本窗口持有的条目引用已全部失效，
+     * 需要清掉选中集合与渲染缓存后整体重绘。
+     */
+    /**
+     * 服务端推回了新的权威视图：切到新实例并整体重绘。
+     *
+     * <p>本窗口持有的条目引用已全部失效，需要清掉选中集合与渲染缓存。
+     * 关键是必须**换掉 {@link #fs}**——否则新数据再正确，渲染读的还是旧视图。
+     */
+    void onViewReplaced(VirtualFileSystem view) {
+        if (view != null) {
+            this.fs = view;
+        }
+        // 当前所在文件夹可能在新视图里已经不存在（被删除/移动过），
+        // 这时回退到根目录，避免渲染出一片空白。
+        if (this.fs.folder(currentKey) == null) {
+            currentKey = DiskFolder.ROOT_ID;
+        }
+        selected.clear();
+        checkedSet.clear();
+        renderedEntryList.clear();
+        ExplorerSession.clearClipboard();
         afterMutation();
     }
 
@@ -1849,8 +1918,7 @@ public final class FileExplorerController {
     /** 递归列出所有可选文件夹（排除源条目自身及其子目录），作为二级菜单项。 */
     private List<CtxEntry> folderChoices(boolean copy, FileExplorerController sourceController) {
         List<CtxEntry> result = new ArrayList<>();
-        collectFolderChoices(result, "thispc", copy, sourceController, 0);
-        collectFolderChoices(result, "home", copy, sourceController, 0);
+        collectFolderChoices(result, DiskFolder.ROOT_ID, copy, sourceController, 0);
         if (result.isEmpty()) {
             result.add(CtxEntry.action(t("informationera.fe.no_folder"), () -> {
             }));
@@ -1993,15 +2061,19 @@ public final class FileExplorerController {
         }
         if (entry.folder && entry.childKey != null) {
             String key = entry.childKey;
-            entries.add(CtxEntry.action(pinned.contains(key)
+            entries.add(CtxEntry.action(ExplorerPreferences.isPinned(key)
                     ? t("informationera.fe.unpin") : t("informationera.fe.pin"), () -> togglePin(key)));
         }
         entries.add(CtxEntry.submenu(t("informationera.fe.send_to"), List.of(
-                CtxEntry.action(t("informationera.fe.desktop"), () -> sendTo("desktop", entry)),
-                CtxEntry.action(t("informationera.fe.documents"), () -> sendTo("documents", entry)),
-                CtxEntry.action(t("informationera.fe.downloads"), () -> sendTo("downloads", entry)))));
-        if ("recyclebin".equals(currentKey)) {
+                CtxEntry.action(t("informationera.fe.disk_root"), () -> sendTo(DiskFolder.ROOT_ID, entry)),
+                CtxEntry.action(t("informationera.folder.blocks"), () -> sendTo(DiskFolder.BLOCKS_ID, entry)),
+                CtxEntry.action(t("informationera.folder.food"), () -> sendTo(DiskFolder.FOOD_ID, entry)),
+                CtxEntry.action(t("informationera.folder.tools"), () -> sendTo(DiskFolder.TOOLS_ID, entry)),
+                CtxEntry.action(t("informationera.folder.weapons"), () -> sendTo(DiskFolder.WEAPONS_ID, entry)))));
+        if (DiskFolder.RECYCLE_ID.equals(currentKey)) {
+            // 回收站里两个动作并存：还原回原位置，或彻底删除（真丢物品）。
             entries.add(CtxEntry.action(t("informationera.fe.restore"), () -> restoreRecycleEntry(entry)));
+            entries.add(CtxEntry.actionDanger(t("informationera.fe.permanently_delete"), this::deletePermanently));
         } else {
             entries.add(CtxEntry.actionDanger(t("informationera.fe.delete"), this::delete));
         }
@@ -2038,8 +2110,7 @@ public final class FileExplorerController {
     private List<CtxEntry> organizeFolderChoices(boolean copy) {
         List<CtxEntry> result = new ArrayList<>();
         List<VirtualFileSystem.Entry> sel = new ArrayList<>(selected);
-        collectOrganizeFolderChoices(result, "thispc", copy, sel, 0);
-        collectOrganizeFolderChoices(result, "home", copy, sel, 0);
+        collectOrganizeFolderChoices(result, DiskFolder.ROOT_ID, copy, sel, 0);
         if (result.isEmpty()) {
             result.add(CtxEntry.action(t("informationera.fe.no_folder"), () -> {
             }));
@@ -2348,13 +2419,9 @@ public final class FileExplorerController {
             cancelRename();
             return;
         }
-        Runnable undo = fs.rename(currentKey, renamingEntry, input.getValue());
+        DiskClient.rename(renamingEntry.id, input.getValue());
         cancelRename();
-        if (undo != null) {
-            pushUndo(undo);
-        }
-        afterMutation();
-        setStatus(undo != null ? t("informationera.fe.status_renamed") : t("informationera.fe.status_rename_invalid"));
+        setStatus(t("informationera.fe.status_renamed"));
     }
 
     private void cancelRename() {
@@ -2433,23 +2500,21 @@ public final class FileExplorerController {
                     return;
                 }
             }
-            // 无冲突：执行剪切粘贴。
-            List<Runnable> undos = new ArrayList<>();
-            int count = 0;
+            // 无冲突：执行剪切粘贴（移动）。
+            List<String> ids = new ArrayList<>();
             for (ExplorerSession.ClipItem item : items) {
                 if (item.sourceFolderKey() == null || item.sourceFolderKey().equals(currentKey)) {
                     continue;
                 }
-                undos.add(fs.move(item.sourceFolderKey(), currentKey, item.entry()));
-                count++;
+                ids.add(item.entry().id);
             }
-            if (count == 0) {
+            if (ids.isEmpty()) {
                 setStatus(t("informationera.fe.status_cannot_paste"));
                 return;
             }
+            int count = ids.size();
             ExplorerSession.clearClipboard();
-            pushUndo(() -> undos.forEach(Runnable::run));
-            afterMutation();
+            DiskClient.move(ids, currentKey);
             setStatus(t("informationera.fe.status_pasted", count));
         } else {
             // 复制粘贴：统一源 key 为 null，冲突检测。
@@ -2461,27 +2526,27 @@ public final class FileExplorerController {
         }
     }
 
+    /**
+     * 删除选中的条目。
+     *
+     * <p>语义随当前位置变化：在普通文件夹里是「移入回收站」；在回收站里已经没有再往回收站
+     * 移的意义，所以直接变成彻底删除——这也是资源管理器的习惯行为。
+     */
     private void delete() {
+        if (DiskFolder.RECYCLE_ID.equals(currentKey)) {
+            deletePermanently();
+            return;
+        }
         if (selected.isEmpty()) {
             setStatus(t("informationera.fe.status_no_selection"));
             return;
         }
-        List<Runnable> undos = new ArrayList<>();
-        int count = 0;
+        List<String> ids = new ArrayList<>();
         for (VirtualFileSystem.Entry entry : selected) {
-            Runnable undo = fs.moveToRecycle(currentKey, entry);
-            if (undo != null) {
-                undos.add(undo);
-                count++;
-            }
+            ids.add(entry.id);
         }
-        if (count == 0) {
-            setStatus(t("informationera.fe.status_no_selection"));
-            return;
-        }
-        pushUndo(() -> undos.forEach(Runnable::run));
-        afterMutation();
-        setStatus(t("informationera.fe.status_deleted_to_recycle", count));
+        DiskClient.toRecycleBin(ids);
+        setStatus(t("informationera.fe.status_deleted_to_recycle", ids.size()));
     }
 
     private void deletePermanently() {
@@ -2489,68 +2554,44 @@ public final class FileExplorerController {
             setStatus(t("informationera.fe.status_no_selection"));
             return;
         }
-        List<Runnable> undos = new ArrayList<>();
-        int count = 0;
+        List<String> ids = new ArrayList<>();
         for (VirtualFileSystem.Entry entry : selected) {
-            undos.add(fs.delete(currentKey, entry));
-            count++;
+            ids.add(entry.id);
         }
-        pushUndo(() -> undos.forEach(Runnable::run));
-        afterMutation();
-        setStatus(t("informationera.fe.status_deleted", count));
+        // 彻底删除会丢弃只被这些文件引用的物品数量，因此走服务端确认。
+        DiskClient.purge(ids);
+        setStatus(t("informationera.fe.status_deleted", ids.size()));
     }
 
     private void emptyRecycleBin() {
-        List<VirtualFileSystem.RecycleEntry> all = fs.recycleEntries();
-        if (all.isEmpty()) {
+        if (fs.recycleCount() <= 0) {
             setStatus(t("informationera.fe.status_recycle_empty"));
             return;
         }
-        Runnable undo = fs.emptyRecycle();
-        pushUndo(undo);
-        afterMutation();
+        DiskClient.emptyRecycleBin();
         setStatus(t("informationera.fe.status_recycle_cleared"));
     }
 
     private void restoreAllRecycle() {
-        List<VirtualFileSystem.RecycleEntry> all = fs.recycleEntries();
-        if (all.isEmpty()) {
+        if (fs.recycleCount() <= 0) {
             setStatus(t("informationera.fe.status_recycle_empty"));
             return;
         }
-        Runnable undo = fs.restoreAllFromRecycle();
-        pushUndo(undo);
-        afterMutation();
+        DiskClient.restoreAll();
         setStatus(t("informationera.fe.status_restored"));
     }
 
     private void restoreRecycleEntry(VirtualFileSystem.Entry entry) {
-        String id = recycleIdForEntry(entry);
-        if (id == null) {
+        if (entry == null) {
             setStatus(t("informationera.fe.status_recycle_empty"));
             return;
         }
-        Runnable undo = fs.restoreFromRecycle(id);
-        if (undo != null) {
-            pushUndo(undo);
-        }
-        afterMutation();
-        setStatus(undo != null ? t("informationera.fe.status_restored") : t("informationera.fe.status_recycle_empty"));
-    }
-
-    /** 找到回收站条目对应的登记 id（按 Entry 引用匹配）。 */
-    private String recycleIdForEntry(VirtualFileSystem.Entry entry) {
-        for (VirtualFileSystem.RecycleEntry record : fs.recycleEntries()) {
-            if (record.entry == entry) {
-                return record.id;
-            }
-        }
-        return null;
+        DiskClient.restore(entry.id);
+        setStatus(t("informationera.fe.status_restored"));
     }
 
     private void createFolder() {
-        pushUndo(fs.createFolder(currentKey, t("informationera.fe.new_folder")));
-        afterMutation();
+        DiskClient.createFolder(currentKey, t("informationera.fe.new_folder"));
         setStatus(t("informationera.fe.status_created_folder"));
     }
 
@@ -2747,8 +2788,11 @@ public final class FileExplorerController {
                 appendPropertyRow(sb, t("informationera.fe.size"), t("informationera.fe.folder"));
                 appendPropertyRow(sb, t("informationera.fe.contains"), t("informationera.fe.detail_contains", childCount(entry.childKey)));
             } else {
-                appendPropertyRow(sb, t("informationera.fe.size"), formatSize(entry.size));
-                appendPropertyRow(sb, t("informationera.fe.occupied_space"), formatSize(entry.size));
+                // 文件的「大小」在物品磁盘里就是它引用的物品数量。
+                appendPropertyRow(sb, t("informationera.fe.item_count"), formatSize(entry.count));
+                if (entry.itemId != null) {
+                    appendPropertyRow(sb, t("informationera.fe.item_type"), entry.itemId);
+                }
             }
             if (entry.shortcutTargetKey != null && fs.folder(entry.shortcutTargetKey) != null) {
                 appendPropertyRow(sb, t("informationera.fe.target"), pathText(entry.shortcutTargetKey));
@@ -2855,6 +2899,23 @@ public final class FileExplorerController {
             case "large" -> 96;
             case "xlarge" -> 128;
             default -> 16;
+        };
+    }
+
+    /**
+     * 图标视图/平铺视图使用的图标尺寸。
+     *
+     * <p>扁平视图（详细/列表/内容）的行高固定，图标只能是 16px；而图标类视图的图标
+     * 应该跟着「查看」档位一起变大变小。平铺视图与图标视图共用同一档位，只是整体略小一档，
+     * 这样两者切换时视觉过渡自然。
+     */
+    private int tileIconSize() {
+        return switch (viewMode) {
+            case "small" -> 32;
+            case "medium" -> 48;
+            case "large" -> 72;
+            case "xlarge" -> 96;
+            default -> 48;
         };
     }
 
@@ -3120,6 +3181,10 @@ public final class FileExplorerController {
         FileExplorerWindow.recordRecentPath(currentKey);
         updateSearchPlaceholder();
         renderContent();
+        // 导航树必须整体重绘：侧边栏的「最近使用」刚刚多了这一条，
+        // 只更新选中态不会把新条目画出来。
+        renderNavigation();
+        // 重绘后节点是新的，选中态要再刷一次。
         renderNavigationState();
         renderBreadcrumb();
         updateNavButtons();
@@ -3173,32 +3238,61 @@ public final class FileExplorerController {
             return;
         }
         StringBuilder sb = new StringBuilder();
-        // 快速访问：固定 + 最近使用。
+        // 导航树分成三段：快速访问（固定 + 最近使用）、主目录树、回收站。
+        // 段与段之间插分割线，避免不同用途的路径挤在一起。
+        boolean sectionWritten = false;
+
+        // 第一段：快速访问。固定项与「最近使用」之间也要有分割线，它们是两组不同的东西。
+        List<String> pinnedKeys = ExplorerPreferences.pinned();
         List<String> recent = FileExplorerWindow.getRecentPaths();
-        boolean hasRecent = !recent.isEmpty();
-        if (!pinned.isEmpty() || hasRecent) {
-            sb.append("<div class=\"fe-nav-title\">").append(t("informationera.fe.quick_access")).append("</div>");
-            if (!pinned.isEmpty()) {
-                for (String key : pinned) {
-                    renderPinnedNode(sb, key);
+        List<String> recentShown = new ArrayList<>();
+        if (!recent.isEmpty()) {
+            int shown = 0;
+            for (String key : recent) {
+                if (pinnedKeys.contains(key)) {
+                    continue;
                 }
-            }
-            if (hasRecent) {
-                sb.append("<div class=\"fe-nav-title fe-nav-subtitle\">").append(t("informationera.fe.recent_use")).append("</div>");
-                int shown = 0;
-                for (String key : recent) {
-                    if (pinned.contains(key)) {
-                        continue;
-                    }
-                    renderPinnedNode(sb, key);
-                    if (++shown >= 8) {
-                        break;
-                    }
+                recentShown.add(key);
+                if (++shown >= 8) {
+                    break;
                 }
             }
         }
-        for (String root : SIDEBAR_ROOTS) {
-            renderSidebarNode(sb, root, 0);
+        if (!pinnedKeys.isEmpty() || !recentShown.isEmpty()) {
+            sb.append("<div class=\"fe-nav-title\">").append(t("informationera.fe.quick_access")).append("</div>");
+            for (String key : pinnedKeys) {
+                renderPinnedNode(sb, key);
+            }
+            if (!recentShown.isEmpty()) {
+                sb.append("<div class=\"fe-nav-sep\"></div>");
+                sb.append("<div class=\"fe-nav-title\">")
+                  .append(t("informationera.fe.recent_use")).append("</div>");
+                for (String key : recentShown) {
+                    renderPinnedNode(sb, key);
+                }
+            }
+            sectionWritten = true;
+        }
+
+        // 第二段：主目录。这里只放**一个**盘根入口（以玩家名命名），
+        // 需要看里面的分类时点它的展开箭头——不要把子文件夹一股脑列出来。
+        VirtualFileSystem.Folder root = fs.folder(DiskFolder.ROOT_ID);
+        if (root != null) {
+            if (sectionWritten) {
+                sb.append("<div class=\"fe-nav-sep\"></div>");
+            }
+            sb.append("<div class=\"fe-nav-title\">").append(t("informationera.fe.main_directory")).append("</div>");
+            renderSidebarNode(sb, DiskFolder.ROOT_ID, 0);
+            sectionWritten = true;
+        }
+
+        // 第三段：回收站。单独成段，不与普通目录混在一起。
+        VirtualFileSystem.Folder recycle = fs.folder(DiskFolder.RECYCLE_ID);
+        if (recycle != null) {
+            if (sectionWritten) {
+                sb.append("<div class=\"fe-nav-sep\"></div>");
+            }
+            renderSidebarNode(sb, DiskFolder.RECYCLE_ID, 0);
         }
         nav.setInnerHTML(sb.toString());
 
@@ -3227,24 +3321,27 @@ public final class FileExplorerController {
         if (folder == null) {
             return;
         }
-        sb.append("<div class=\"fe-nav-item\" data-path=\"").append(escape(key))
-          .append("\" style=\"padding-left:8px;\">");
+        sb.append("<div class=\"fe-nav-item\" data-path=\"").append(escape(key)).append("\">");
         sb.append("<span class=\"fe-chevron fe-chevron-empty\"></span>");
         sb.append(folderIcon(16));
         sb.append("<span class=\"fe-nav-label\">").append(escape(folder.name)).append("</span>");
         sb.append("</div>");
     }
 
+    /**
+     * 渲染一个导航项。
+     *
+     * <p>刻意不做层级缩进：导航栏只有 240px 宽，缩进叠上长名称会撑出横向滚动条。
+     * 层级改由展开/收起（箭头）和图标表达。
+     */
     private void renderSidebarNode(StringBuilder sb, String key, int depth) {
         VirtualFileSystem.Folder folder = fs.folder(key);
         if (folder == null) {
             return;
         }
-        boolean expandable = !"home".equals(key) && fs.hasChildFolders(key);
+        boolean expandable = fs.hasChildFolders(key);
         boolean expanded = expandable && expandedSidebar.contains(key);
-        int pad = 8 + depth * 16;
-        sb.append("<div class=\"fe-nav-item\" data-path=\"").append(escape(key))
-          .append("\" style=\"padding-left:").append(pad).append("px;\">");
+        sb.append("<div class=\"fe-nav-item\" data-path=\"").append(escape(key)).append("\">");
         if (expandable) {
             sb.append("<span class=\"fe-chevron\" data-toggle=\"").append(escape(key)).append("\">")
               .append(expanded ? chevronDown() : chevronRight()).append("</span>");
@@ -3257,6 +3354,9 @@ public final class FileExplorerController {
 
         if (expanded) {
             for (VirtualFileSystem.Entry child : fs.childFolders(key)) {
+                if (DiskFolder.RECYCLE_ID.equals(child.childKey)) {
+                    continue;
+                }
                 renderSidebarNode(sb, child.childKey, depth + 1);
             }
         }
@@ -3272,11 +3372,8 @@ public final class FileExplorerController {
     }
 
     private void togglePin(String key) {
-        if (pinned.contains(key)) {
-            pinned.remove(key);
-        } else {
-            pinned.add(key);
-        }
+        // 状态直接写进客户端配置，重启后仍然保留。
+        ExplorerPreferences.togglePin(key);
         renderNavigation();
         renderNavigationState();
     }
@@ -3300,6 +3397,9 @@ public final class FileExplorerController {
         if (content == null) {
             return;
         }
+        // 条目马上要被整体替换，旧的 mouseout 不会再触发，这里必须主动收起提示，
+        // 否则鼠标划过时留在屏幕上的提示框会永久卡住。
+        hideTooltip();
         // 视图模式类：控制图标网格的列宽与图标尺寸，切换布局而不是单纯缩放。
         content.getClassList().remove("fe-view-small", "fe-view-medium", "fe-view-large", "fe-view-xlarge");
         if ("small".equals(viewMode) || "medium".equals(viewMode) || "large".equals(viewMode) || "xlarge".equals(viewMode)) {
@@ -3335,6 +3435,7 @@ public final class FileExplorerController {
             });
         }
         bindItemListeners();
+        driveItemIcons();
         bindTableHeaders();
         updateSelectionVisuals();
         updateStatusBar();
@@ -3582,7 +3683,14 @@ public final class FileExplorerController {
         Element.DOMRect rect = content.getBoundingClientRect();
         double width = rect != null && rect.width > 0 ? rect.width : 980;
         if (tiles) {
-            return Math.max(1, (int) Math.floor(width / 240));
+            // 与 CSS 里 .fe-view-* .fe-tiles 的 minmax 保持一致，否则虚拟滚动的列数会算错。
+            double tileColWidth = switch (viewMode) {
+                case "small" -> 180;
+                case "large" -> 300;
+                case "xlarge" -> 360;
+                default -> 240;
+            };
+            return Math.max(1, (int) Math.floor(width / tileColWidth));
         }
         // 图标视图列宽按 viewMode 近似，与 CSS minmax 对齐。
         double colWidth = switch (viewMode) {
@@ -3605,8 +3713,14 @@ public final class FileExplorerController {
         };
     }
 
+    /**
+     * 平铺视图的行高。
+     *
+     * <p>必须跟 {@link #tileIconSize()} 一起变：图标变大而这里不变的话，条目超过 200 条
+     * 走虚拟滚动时行高估算会偏小，滚动条位置与内容就会错位。
+     */
     private double tileRowHeight() {
-        return 96;
+        return tileIconSize() + 48.0;
     }
 
     private void onContentScroll() {
@@ -3625,6 +3739,7 @@ public final class FileExplorerController {
                     renderContentVirtualGrid(entries);
                 }
                 bindItemListeners();
+                driveItemIcons();
                 bindTableHeaders();
                 updateSelectionVisuals();
             }
@@ -4250,9 +4365,7 @@ public final class FileExplorerController {
         }
         sb.append("<div class=\"fe-icon\">").append(iconFor(entry, iconSize)).append("</div>");
         sb.append("<div class=\"fe-name\" data-name=\"1\">").append(escape(displayName(entry))).append("</div>");
-        if (t("informationera.fe.drive_type").equals(entry.type)) {
-            sb.append(driveBar(entry));
-        }
+
         sb.append("</div>");
         return sb.toString();
     }
@@ -4267,16 +4380,12 @@ public final class FileExplorerController {
         if (checkboxes) {
             sb.append("<span class=\"fe-check\" data-id=\"e").append(index).append("\"></span>");
         }
-        sb.append("<div class=\"fe-icon\">").append(iconFor(entry, 48)).append("</div>");
+        sb.append("<div class=\"fe-icon\">").append(iconFor(entry, tileIconSize())).append("</div>");
         sb.append("<div class=\"fe-tile-meta\">");
         sb.append("<div class=\"fe-tile-name\" data-name=\"1\">").append(escape(displayName(entry))).append("</div>");
         sb.append("<div class=\"fe-tile-line\">").append(escape(entry.type)).append("</div>");
         sb.append("<div class=\"fe-tile-line\">").append(entry.folder ? t("informationera.fe.folder") : formatSize(entry.size)).append("</div>");
-        if (t("informationera.fe.drive_type").equals(entry.type)) {
-            sb.append(driveBar(entry));
-        } else {
-            sb.append("<div class=\"fe-tile-line\">").append(escape(entry.modified)).append("</div>");
-        }
+        sb.append("<div class=\"fe-tile-line\">").append(escape(entry.modified)).append("</div>");
         sb.append("</div></div>");
         return sb.toString();
     }
@@ -4583,6 +4692,7 @@ public final class FileExplorerController {
         tooltip.setTextContent(metadataText(entry));
         moveTooltip(x, y);
         tooltip.setInlineStyleProperty("display", "block");
+        tooltipVisible = true;
     }
 
     private void moveTooltip(double x, double y) {
@@ -4601,8 +4711,31 @@ public final class FileExplorerController {
     }
 
     private void hideTooltip() {
+        tooltipVisible = false;
         if (tooltip != null) {
             tooltip.setInlineStyleProperty("display", "none");
+        }
+    }
+
+    /**
+     * 每 tick 校验提示框是否还该显示。
+     *
+     * <p>只靠条目的 {@code mouseout} 是不够的：鼠标划过时条目会被整体重渲染、鼠标也可能
+     * 直接移到窗口外或界面上没有条目的区域，这些情况都不会触发 {@code mouseout}，
+     * 提示框就会永久留在屏幕上。这里按「鼠标下是否真的还有一个条目」来兜底。
+     */
+    void tickTooltip() {
+        if (!tooltipVisible || tooltip == null || document == null || !document.isActive()) {
+            return;
+        }
+        Position doc = document.getMouseDocumentPosition();
+        if (doc == null) {
+            hideTooltip();
+            return;
+        }
+        Element hit = document.hitTest(doc);
+        if (hit == null || hit.closest(".fe-item") == null) {
+            hideTooltip();
         }
     }
 
@@ -4748,8 +4881,8 @@ public final class FileExplorerController {
     }
 
     private void createShortcut(VirtualFileSystem.Entry entry) {
-        pushUndo(fs.createShortcut(currentKey, currentKey, entry));
-        afterMutation();
+        // 快捷方式概念已取消：文件的「复制」本身就是增加一个指向同一份库存的引用。
+        DiskClient.copy(List.of(entry.id), currentKey);
         setStatus(t("informationera.fe.status_shortcut_created", entry.name));
     }
 
@@ -4765,37 +4898,81 @@ public final class FileExplorerController {
             setStatus(t("informationera.fe.status_path_not_found", targetKey));
             return;
         }
-        pushUndo(fs.duplicateInto(targetKey, entry));
-        afterMutation();
+        DiskClient.copy(java.util.List.of(entry.id), targetKey);
         setStatus(t("informationera.fe.status_sent_to", target.name));
     }
 
     // ---------- 工具方法 ----------
 
+    /**
+     * 条目图标。
+     *
+     * <p>物品文件渲染成 AUI 的 {@code <item>} 元素——它走真实物品的图标绘制链路
+     * （贴图、耐久条、数量角标都包含在内），具体栈由 Java 侧 {@link #driveItemIcons}
+     * 用 {@code setDrivenState} 喂入。这里只输出一个带定位用 data 属性的空壳，
+     * 不在 HTML 里写物品表达式，避免「文本表达式」与「驱动栈」两套来源互相覆盖。
+     *
+     * <p>{@code interactive="0"} 关掉该元素自身的交互能力：资源管理器里整行的
+     * 点击/拖拽由行容器统一处理，图标不应该独立参与命中。
+     */
     static String iconFor(VirtualFileSystem.Entry entry, int size) {
-        if (t("informationera.fe.drive_type").equals(entry.type)) {
-            return driveIcon(size);
+        if (entry.folder) {
+            return folderIcon(size);
         }
-        return entry.folder ? folderIcon(size) : fileIcon(size);
+        return "<span class=\"fe-item-icon\" data-icon-for=\"" + escapeAttr(entry.id) + "\""
+                + " style=\"width:" + size + "px;height:" + size + "px\">"
+                + "<item interactive=\"0\"></item></span>";
     }
 
-    /** 驱动器容量条（虚拟演示数据，按名称哈希生成固定占比）。 */
-    private static String driveBar(VirtualFileSystem.Entry entry) {
-        int used = Math.abs(entry.name.hashCode()) % 95 + 1;
-        return "<div class=\"fe-drive-bar\"><div class=\"fe-drive-bar-fill\" style=\"width:" + used + "%\"></div></div>"
-                + "<div class=\"fe-drive-bar-text\">" + t("informationera.fe.status_drive_used", used) + "</div>";
+    /**
+     * 渲染完成后，把每个物品文件对应的真实 ItemStack 喂给它的 {@code <item>} 元素。
+     *
+     * <p>这一步必须在 DOM 建好之后做：{@code setDrivenState} 需要拿到已经存在的元素实例。
+     */
+    private void driveItemIcons() {
+        List<Element> icons = document.querySelectorAll(".fe-item-icon");
+        if (icons == null || icons.isEmpty()) {
+            return;
+        }
+        HolderLookup.Provider registries = DiskClient.registryProvider();
+        for (Element icon : icons) {
+            String nodeId = icon.getAttribute("data-icon-for");
+            if (nodeId == null || nodeId.isEmpty()) {
+                continue;
+            }
+            VirtualFileSystem.Entry entry = entryById(nodeId);
+            if (entry == null || entry.folder || entry.itemKey == null) {
+                continue;
+            }
+            Element child = icon.querySelector("item");
+            if (!(child instanceof Item itemElement)) {
+                continue;
+            }
+            ItemStack stack = fs.iconStackOf(entry, registries);
+            if (stack.isEmpty()) {
+                continue;
+            }
+            // overlayText 传 null：让渲染层自己用真实数量画角标。
+            itemElement.setDrivenState(stack, ItemStacks.overlayText(entry.count), false, false, Item.Source.INGREDIENT);
+        }
+    }
+
+    /** 按节点 id 找到当前渲染列表里的条目。 */
+    private VirtualFileSystem.Entry entryById(String nodeId) {
+        for (VirtualFileSystem.Entry entry : renderedEntryList) {
+            if (entry.id.equals(nodeId)) {
+                return entry;
+            }
+        }
+        return null;
+    }
+
+    private static String escapeAttr(String value) {
+        return escape(value);
     }
 
     private static String folderIcon(int size) {
         return "<svg viewBox=\"0 0 24 24\" style=\"width:" + size + "px;height:" + size + "px;color:var(--ore-gold)\"><path d=\"M3 7h6l2 2h10v11H3z\" fill=\"currentColor\"/></svg>";
-    }
-
-    private static String fileIcon(int size) {
-        return "<svg viewBox=\"0 0 24 24\" style=\"width:" + size + "px;height:" + size + "px;color:#d0d1d4\"><path d=\"M6 2h8l4 4v16H6z\" fill=\"currentColor\"/></svg>";
-    }
-
-    private static String driveIcon(int size) {
-        return "<svg viewBox=\"0 0 24 24\" style=\"width:" + size + "px;height:" + size + "px;color:#58a6d2\"><rect x=\"3\" y=\"8\" width=\"18\" height=\"8\" fill=\"currentColor\"/><circle cx=\"16\" cy=\"12\" r=\"2\" fill=\"#202124\"/></svg>";
     }
 
     private static String chevronRight() {
@@ -4817,19 +4994,22 @@ public final class FileExplorerController {
         return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;");
     }
 
-    private static String formatSize(long bytes) {
-        if (bytes < 1024L) {
-            return bytes + " B";
+    /**
+     * 数量格式化。
+     *
+     * <p>这个位置原先显示「文件大小（字节）」，在物品磁盘里对应的语义就是「数量」。
+     * 超过一万用「万」缩写，避免数量列被长数字撑开。
+     */
+    private static String formatSize(long count) {
+        if (count < 0L) {
+            return "";
         }
-        double kb = bytes / 1024.0;
-        if (kb < 1024.0) {
-            return String.format(Locale.ROOT, "%.1f KB", kb);
+        if (count < 10_000L) {
+            return Long.toString(count);
         }
-        double mb = kb / 1024.0;
-        if (mb < 1024.0) {
-            return String.format(Locale.ROOT, "%.1f MB", mb);
+        if (count < 100_000_000L) {
+            return String.format(Locale.ROOT, "%.1f万", count / 10_000.0);
         }
-        double gb = mb / 1024.0;
-        return String.format(Locale.ROOT, "%.2f GB", gb);
+        return String.format(Locale.ROOT, "%.2f亿", count / 100_000_000.0);
     }
 }
