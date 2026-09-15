@@ -36,7 +36,7 @@ public final class DiskService {
             if (entry == null || entry.key() == null || entry.amount() <= 0L) {
                 continue;
             }
-            OpResult result = disk.deposit(folderId, entry.key(), entry.amount());
+            OpResult result = disk.deposit(folderId, entry.key(), entry.amount(), entry.name());
             if (!result.isOk()) {
                 return result;
             }
@@ -96,14 +96,21 @@ public final class DiskService {
         return result;
     }
 
-    /** 一次入库请求：某种物品、若干数量。 */
+    /** 一次入库请求：某种物品、若干数量，以及它应该显示的名字。 */
     public static final class Deposit {
         private final ItemKey key;
         private final long amount;
+        /** 物品的显示名（客户端按自己的语言给出）。为空时回退到 id 派生的名字。 */
+        private final String name;
 
         public Deposit(ItemKey key, long amount) {
+            this(key, amount, null);
+        }
+
+        public Deposit(ItemKey key, long amount, String name) {
             this.key = key;
             this.amount = amount;
+            this.name = name;
         }
 
         public ItemKey key() {
@@ -112,6 +119,10 @@ public final class DiskService {
 
         public long amount() {
             return amount;
+        }
+
+        public String name() {
+            return name;
         }
     }
 

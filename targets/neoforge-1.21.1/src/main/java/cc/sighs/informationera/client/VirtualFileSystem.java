@@ -156,7 +156,7 @@ public final class VirtualFileSystem {
                 fs.parents.put(childId, folder.id());
                 DiskFile file = disk.file(childId);
                 if (file != null) {
-                    target.entries.add(fs.fileEntry(disk, file));
+                    target.entries.add(fs.fileEntry(disk, file, registries));
                 } else {
                     DiskFolder child = disk.folder(childId);
                     if (child != null) {
@@ -196,10 +196,12 @@ public final class VirtualFileSystem {
         return folder.name();
     }
 
-    private Entry fileEntry(PlayerDisk disk, DiskFile file) {
+    private Entry fileEntry(PlayerDisk disk, DiskFile file, HolderLookup.Provider registries) {
         long count = disk.quantityOf(file.key());
         String origin = disk.isInRecycleBin(file.id()) ? parents.get(file.id()) : null;
-        return new Entry(file.id(), file.name(), false, 0, count, file.key(), file.key().itemId(),
+        // 名字直接来自磁盘：入库时就写的是物品的显示名，所以这里原样显示。
+        return new Entry(file.id(), file.name(), false, 0, count, file.key(),
+                file.key().itemId(),
                 FileExplorerText.t("informationera.fe.item_type"),
                 formatTime(file.updatedAt()), formatTime(file.createdAt()), null,
                 null, origin, cutIds.contains(file.id()));

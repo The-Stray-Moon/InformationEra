@@ -105,13 +105,15 @@ public final class DiskRequestDispatcher {
         }
 
         // 第一步：只读地收集，不碰任何槽位。
+        // 参数从下标 1 起是「槽位索引, 显示名」成对出现。
         List<DiskService.Deposit> deposits = new ArrayList<>();
         List<Slot> sources = new ArrayList<>();
-        for (int i = 1; i < args.size(); i++) {
+        for (int i = 1; i < args.size(); i += 2) {
             int slotIndex = parseInt(args.get(i), -1);
             if (slotIndex < 0 || slotIndex >= menu.slots.size()) {
                 continue;
             }
+            String displayName = i + 1 < args.size() ? args.get(i + 1) : null;
             Slot slot = menu.getSlot(slotIndex);
             ItemStack stack = slot.getItem();
             if (stack.isEmpty() || !slot.mayPickup(player)) {
@@ -121,7 +123,7 @@ public final class DiskRequestDispatcher {
             if (key == null) {
                 continue;
             }
-            deposits.add(new DiskService.Deposit(key, stack.getCount()));
+            deposits.add(new DiskService.Deposit(key, stack.getCount(), displayName));
             sources.add(slot);
         }
         if (deposits.isEmpty()) {

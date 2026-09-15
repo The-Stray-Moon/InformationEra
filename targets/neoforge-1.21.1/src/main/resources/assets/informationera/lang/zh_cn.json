@@ -202,6 +202,7 @@
   "informationera.fe.attributes": "属性",
 
   "informationera.fe.item_type": "物品",
+  "informationera.fe.item_id": "物品 ID",
   "informationera.fe.item_count": "数量",
   "informationera.fe.disk_name": "信息磁盘",
   "informationera.fe.disk_root": "根目录",

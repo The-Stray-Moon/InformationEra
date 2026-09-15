@@ -202,6 +202,7 @@
   "informationera.fe.attributes": "Attributes",
 
   "informationera.fe.item_type": "Item",
+  "informationera.fe.item_id": "Item ID",
   "informationera.fe.item_count": "Count",
   "informationera.fe.disk_name": "Information Disk",
   "informationera.fe.disk_root": "Root",

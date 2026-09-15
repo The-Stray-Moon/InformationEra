@@ -2,9 +2,12 @@ package cc.sighs.informationera.disk;
 
 import org.junit.Test;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -127,6 +130,148 @@ public class PlayerDiskTest {
         assertEquals(4L, disk.withdraw(APPLE, 4L));
         assertEquals(6L, disk.quantityOf(APPLE));
         assertEquals("复制出来的文件必须同步减少", 6L, disk.quantityOf(APPLE));
+    }
+
+    /**
+     * 复制到**同一个文件夹**：必须成功并自动生成不重名的新文件。
+     *
+     * <p>对应 Windows 的「复制后在原文件夹粘贴」，它是直接变出一个副本、不打断操作，
+     * 而不是弹窗问「同名了怎么办」。
+     */
+    @Test
+    public void copyingIntoTheSameFolderAutoRenames() {
+        PlayerDisk disk = newDisk();
+        disk.deposit(DiskFolder.ROOT_ID, APPLE, 10L);
+        String fileId = firstFileId(disk, APPLE);
+        String originalName = disk.file(fileId).name();
+
+        OpResult result = disk.transfer(Collections.singletonList(fileId), DiskFolder.ROOT_ID, true);
+        assertTrue("复制到原文件夹应当成功", result.isOk());
+
+        // 两个文件都在根目录，且名字不重复。
+        assertEquals(2, countFilesForKind(disk, APPLE));
+        List<String> names = new ArrayList<>();
+        for (String childId : disk.childrenOf(DiskFolder.ROOT_ID)) {
+            if (disk.file(childId) != null) {
+                names.add(disk.file(childId).name());
+            }
+        }
+        assertTrue("原文件应保留", names.contains(originalName));
+        assertEquals("名字必须互不重复", 2, new HashSet<>(names).size());
+        // 副本仍然共享同一份库存。
+        assertEquals(10L, disk.quantityOf(APPLE));
+    }
+
+    /** 连续复制同一个文件多次，编号必须从 2 起逐个递增。 */
+    @Test
+    public void repeatedCopyNumbersFromTwoUpwards() {
+        PlayerDisk disk = newDisk();
+        disk.deposit(DiskFolder.ROOT_ID, APPLE, 4L);
+        String fileId = firstFileId(disk, APPLE);
+        String original = disk.file(fileId).name();
+
+        for (int i = 0; i < 3; i++) {
+            assertTrue(disk.transfer(Collections.singletonList(fileId), DiskFolder.ROOT_ID, true).isOk());
+        }
+
+        List<String> names = fileNamesIn(disk, DiskFolder.ROOT_ID);
+        assertEquals(4, names.size());
+        assertTrue(names.contains(original));
+        // 编号从 2 起，不是从 1 起。
+        assertTrue("应生成 (2): " + names, names.contains(original + " (2)"));
+        assertTrue("应生成 (3): " + names, names.contains(original + " (3)"));
+        assertTrue("应生成 (4): " + names, names.contains(original + " (4)"));
+        assertFalse("不应出现 (1)", names.contains(original + " (1)"));
+        assertEquals(4L, disk.quantityOf(APPLE));
+    }
+
+    /**
+     * 复制一个**已经是副本**的文件：编号要继续递增，不能把后缀一层层摞起来。
+     *
+     * <p>即复制 {@code apple (2)} 得到 {@code apple (3)}，而不是 {@code apple (2) (2)}。
+     * 这是 Windows 资源管理器的行为。
+     */
+    @Test
+    public void copyingACopyDoesNotNestSuffixes() {
+        PlayerDisk disk = newDisk();
+        disk.deposit(DiskFolder.ROOT_ID, APPLE, 2L);
+        String fileId = firstFileId(disk, APPLE);
+        String original = disk.file(fileId).name();
+
+        // 先造出一个副本 apple (2)。
+        assertTrue(disk.transfer(Collections.singletonList(fileId), DiskFolder.ROOT_ID, true).isOk());
+        String copyId = fileIdByName(disk, DiskFolder.ROOT_ID, original + " (2)");
+        assertNotNull("应先生成 (2) 副本", copyId);
+
+        // 再复制这个副本本身。
+        assertTrue(disk.transfer(Collections.singletonList(copyId), DiskFolder.ROOT_ID, true).isOk());
+
+        List<String> names = fileNamesIn(disk, DiskFolder.ROOT_ID);
+        assertTrue("应生成 (3): " + names, names.contains(original + " (3)"));
+        for (String name : names) {
+            assertFalse("不应出现嵌套后缀: " + name, name.contains(") ("));
+        }
+    }
+
+    /** 复制文件夹时同样按编号递增，不嵌套后缀。 */
+    @Test
+    public void copyingFoldersNumbersFromTwoUpwards() {
+        PlayerDisk disk = newDisk();
+        String folder = createFolder(disk, DiskFolder.ROOT_ID, "Pics");
+
+        assertTrue(disk.transfer(Collections.singletonList(folder), DiskFolder.ROOT_ID, true).isOk());
+        assertTrue(disk.transfer(Collections.singletonList(folder), DiskFolder.ROOT_ID, true).isOk());
+
+        List<String> names = new ArrayList<>();
+        for (String childId : disk.childrenOf(DiskFolder.ROOT_ID)) {
+            if (disk.folder(childId) != null) {
+                names.add(disk.folder(childId).name());
+            }
+        }
+        assertTrue("应生成 Pics (2): " + names, names.contains("Pics (2)"));
+        assertTrue("应生成 Pics (3): " + names, names.contains("Pics (3)"));
+        assertFalse("不应出现 Pics (1)", names.contains("Pics (1)"));
+    }
+
+    /** 列出某文件夹下所有文件的名字。 */
+    private static List<String> fileNamesIn(PlayerDisk disk, String folderId) {
+        List<String> names = new ArrayList<>();
+        for (String childId : disk.childrenOf(folderId)) {
+            if (disk.file(childId) != null) {
+                names.add(disk.file(childId).name());
+            }
+        }
+        return names;
+    }
+
+    /** 按名字找文件 id，找不到返回 null。 */
+    private static String fileIdByName(PlayerDisk disk, String folderId, String name) {
+        for (String childId : disk.childrenOf(folderId)) {
+            if (disk.file(childId) != null && name.equals(disk.file(childId).name())) {
+                return childId;
+            }
+        }
+        return null;
+    }
+
+    /** 连续复制同一个文件多次，每次都要拿到不同的名字。 */
+    @Test
+    public void repeatedCopyKeepsProducingUniqueNames() {
+        PlayerDisk disk = newDisk();
+        disk.deposit(DiskFolder.ROOT_ID, APPLE, 4L);
+        String fileId = firstFileId(disk, APPLE);
+
+        for (int i = 0; i < 3; i++) {
+            assertTrue(disk.transfer(Collections.singletonList(fileId), DiskFolder.ROOT_ID, true).isOk());
+        }
+        assertEquals(4, countFilesForKind(disk, APPLE));
+        Set<String> names = new HashSet<>();
+        for (String childId : disk.childrenOf(DiskFolder.ROOT_ID)) {
+            if (disk.file(childId) != null) {
+                assertTrue("名字不能重复: " + disk.file(childId).name(), names.add(disk.file(childId).name()));
+            }
+        }
+        assertEquals(4L, disk.quantityOf(APPLE));
     }
 
     /**

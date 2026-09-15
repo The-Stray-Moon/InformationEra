@@ -66,9 +66,10 @@ public final class ContainerSlotInterop {
             return;
         }
         // 槽位索引使用菜单内的全局下标，服务端据此重新读取真实物品与数量。
-        DiskClient.deposit(null, List.of(slot.index));
-        DiskClient.showStatus(FileExplorerText.t("informationera.msg.depositing",
-                stack.getHoverName().getString()));
+        // 显示名一并带上：物品的本地化名只有客户端知道。
+        String displayName = stack.getHoverName().getString();
+        DiskClient.deposit(null, List.of(slot.index), List.of(displayName));
+        DiskClient.showStatus(FileExplorerText.t("informationera.msg.depositing", displayName));
         // 取消原版点击：物品不应该在光标上出现。
         event.setCanceled(true);
     }

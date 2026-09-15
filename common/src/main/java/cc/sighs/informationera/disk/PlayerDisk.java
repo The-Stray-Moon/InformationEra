@@ -479,7 +479,15 @@ public final class PlayerDisk {
      * @param key          物品标识
      * @param amount       数量，必须为正
      */
-    public OpResult deposit(String folderId, ItemKey key, long amount) {
+    /**
+     * 入库：把某种物品的数量并入库存，必要时新建一个文件来引用它。
+     *
+     * @param folderId 希望引用该物品的文件夹；为 null 时沿用已有文件所在文件夹，都没有时放根目录
+     * @param key      物品标识
+     * @param amount   数量，必须为正
+     * @param name     新建文件时使用的显示名；为空则用 id 派生的名字
+     */
+    public OpResult deposit(String folderId, ItemKey key, long amount, String name) {
         if (key == null || amount <= 0L) {
             return OpResult.fail("informationera.msg.invalid_amount");
         }
@@ -491,13 +499,21 @@ public final class PlayerDisk {
             target = DiskFolder.ROOT_ID;
         }
         // 库存必须始终有文件可达，否则会出现"有数量但看不到文件"的悬空物品。
+        // 已经有文件引用这种物品时不再新建，也就不会改动它的名字——名字属于玩家，
+        // 后续入库不应该把它重置掉。
         if (existing == null) {
             long now = System.currentTimeMillis();
-            DiskFile file = new DiskFile(nextId("d"), key, DiskFile.defaultName(key), now, now);
+            String displayName = name == null || name.isBlank() ? DiskFile.defaultName(key) : name.trim();
+            DiskFile file = new DiskFile(nextId("d"), key, displayName, now, now);
             fileMap.put(file.id(), file);
             children.get(target).add(file.id());
         }
         return OpResult.ok("informationera.msg.deposited", String.valueOf(amount));
+    }
+
+    /** 入库（不指定显示名，用 id 派生的名字）。 */
+    public OpResult deposit(String folderId, ItemKey key, long amount) {
+        return deposit(folderId, key, amount, null);
     }
 
     /**
@@ -761,6 +777,7 @@ public final class PlayerDisk {
         return false;
     }
 
+    /** 目标里没有同名就用原名，否则从 (2) 起找第一个空位。回收站重命名用它。 */
     private String uniqueName(String folderId, String base) {
         if (!hasChildNamed(folderId, base)) {
             return base;
@@ -770,6 +787,50 @@ public final class PlayerDisk {
             n++;
         }
         return base + " (" + n + ")";
+    }
+
+    /**
+     * 生成副本名字，语义对齐 Windows 文件资源管理器。
+     *
+     * <p>规则统一为一条：**剥掉名字里已存在的 {@code (N)} 后缀得到基础名，再从这个基础名
+     * 从 2 开始找第一个没被占用的编号**。
+     *
+     * <ul>
+     *   <li>{@code apple} → {@code apple (2)}（已存在则 (3)、以此类推）</li>
+     *   <li>{@code apple (2)} → {@code apple (3)}，不会摞成 {@code apple (2) (2)}</li>
+     * </ul>
+     */
+    private String uniqueCopyName(String folderId, String base) {
+        String stem = stripCopySuffix(base);
+        if (stem.isEmpty()) {
+            stem = base;
+        }
+        int n = 2;
+        while (hasChildNamed(folderId, stem + " (" + n + ")")) {
+            n++;
+        }
+        return stem + " (" + n + ")";
+    }
+
+    /** 剥掉结尾的 {@code (数字)} 后缀；没有则原样返回。 */
+    private static String stripCopySuffix(String name) {
+        if (name == null || !name.endsWith(")")) {
+            return name;
+        }
+        int open = name.lastIndexOf(" (");
+        if (open <= 0) {
+            return name;
+        }
+        String inner = name.substring(open + 2, name.length() - 1);
+        if (inner.isEmpty()) {
+            return name;
+        }
+        for (int i = 0; i < inner.length(); i++) {
+            if (!Character.isDigit(inner.charAt(i))) {
+                return name;
+            }
+        }
+        return name.substring(0, open);
     }
 
     private String firstFileIdOf(ItemKey key) {
@@ -790,13 +851,13 @@ public final class PlayerDisk {
             if (source == null) {
                 return;
             }
-            String name = uniqueName(targetFolderId, source.name());
+            String name = uniqueCopyName(targetFolderId, source.name());
             DiskFile copy = new DiskFile(nextId("d"), source.key(), name, now, now);
             fileMap.put(copy.id(), copy);
             children.get(targetFolderId).add(copy.id());
             return;
         }
-        String name = uniqueName(targetFolderId, sourceFolder.name());
+        String name = uniqueCopyName(targetFolderId, sourceFolder.name());
         DiskFolder copy = new DiskFolder(nextId("f"), name, targetFolderId, now, now);
         folders.put(copy.id(), copy);
         children.put(copy.id(), new ArrayList<>());

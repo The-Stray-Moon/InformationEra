@@ -81,16 +81,33 @@ public final class DiskClient {
      * @param folderId 目标文件夹；null 表示用聚焦文件夹，再回退到下载目录
      * @param slots    槽位索引列表（玩家当前菜单的 slot index）
      */
-    public static void deposit(String folderId, List<Integer> slots) {
+    /**
+     * 把指定槽位的物品存入磁盘。
+     *
+     * <p>参数按「槽位索引, 物品显示名」成对传递。名称由客户端提供，因为物品的本地化名
+     * 只有客户端知道（服务端拿不到玩家的语言）；服务端把它当作新文件的显示名。
+     *
+     * @param folderId 目标文件夹；null 表示用聚焦文件夹，再回退到根目录
+     * @param slots    槽位索引列表（玩家当前菜单的 slot index）
+     * @param names    与 slots 一一对应的显示名；可为 null 或元素为空
+     */
+    public static void deposit(String folderId, List<Integer> slots, List<String> names) {
         if (slots == null || slots.isEmpty()) {
             return;
         }
-        List<String> args = new ArrayList<>(slots.size() + 1);
+        List<String> args = new ArrayList<>(slots.size() * 2 + 1);
         args.add(resolveTargetFolder(folderId));
-        for (Integer slot : slots) {
-            args.add(String.valueOf(slot));
+        for (int i = 0; i < slots.size(); i++) {
+            args.add(String.valueOf(slots.get(i)));
+            String name = names != null && i < names.size() ? names.get(i) : null;
+            args.add(name == null ? "" : name);
         }
         send(new DiskRequestPacket(RequestType.DEPOSIT, args));
+    }
+
+    /** 不带显示名的入库。 */
+    public static void deposit(String folderId, List<Integer> slots) {
+        deposit(folderId, slots, null);
     }
 
     /** 把磁盘里的一种物品取出到某个槽位；数量由服务端按槽位上限决定。 */

@@ -35,6 +35,24 @@ public final class ItemStacks {
         return new ItemKey(id.toString(), nbtOf(stack, registries));
     }
 
+    /**
+     * 取物品的本地化显示名（例如 {@code minecraft:iron_ingot} → 「铁锭」）。
+     *
+     * <p>用 {@link ItemStack#getHoverName()}：它跟随玩家语言，也带上铁砧改名之类的自定义名。
+     * 入库时由客户端调用，把结果作为文件的显示名发给服务端——因为本地化只有客户端做得了。
+     */
+    public static String localisedNameOf(ItemKey key, HolderLookup.Provider registries) {
+        if (key == null) {
+            return "";
+        }
+        ItemStack stack = stackOf(key, 1L, registries);
+        if (!stack.isEmpty()) {
+            return stack.getHoverName().getString();
+        }
+        // 取不到物品（例如模组被卸载）时回退到 id 的路径段，保证永远有东西可显示。
+        return cc.sighs.informationera.disk.DiskFile.defaultName(key);
+    }
+
     /** 把物品的组件序列化成 NBT 字符串；无组件时返回空串。 */
     public static String nbtOf(ItemStack stack, HolderLookup.Provider registries) {
         if (stack == null || stack.isEmpty()) {

@@ -45,6 +45,16 @@ public final class FileExplorerController {
     /** 虚拟滚动缓冲行数。 */
     private static final int VIRTUAL_BUFFER = 12;
 
+    /** 重命名输入框的左右内边距（与 CSS 的 padding 保持一致）。 */
+    private static final double RENAME_PADDING_X = 6.0;
+    /**
+     * 重命名输入框的最小高度。
+     *
+     * <p>要能装下「文字本体 + 上下 padding + 边框」：字号 13px 的正文约 17px，
+     * 上下 padding 各 3px、边框各 2px，合计约 27px。低于这个值文字会被裁。
+     */
+    private static final double RENAME_MIN_HEIGHT = 28.0;
+
     private static final String[] COL_FIELDS = {"name", "modified", "type", "size", "created", "author"};
 
     private static String[] columnLabels() {
@@ -1786,6 +1796,8 @@ public final class FileExplorerController {
             if (entry.folder && entry.childKey != null && targetKey.startsWith(entry.childKey)) {
                 continue;
             }
+            // 注意：复制到同一个文件夹是合法操作（Windows 里会生成「xxx - 副本」），
+            // 只有**移动**到原地才是无意义的。
             if (targetKey.equals(sourceKey) && !copy) {
                 continue;
             }
@@ -1795,41 +1807,46 @@ public final class FileExplorerController {
             setStatus(copy ? t("informationera.fe.status_cannot_copy") : t("informationera.fe.status_cannot_move"));
             return false;
         }
-        // 检测同名冲突。
-        List<VirtualFileSystem.Entry> conflicts = new ArrayList<>();
-        for (VirtualFileSystem.Entry entry : valid) {
-            if (fs.hasName(targetKey, entry.name)) {
-                conflicts.add(entry);
+        // 复制不弹冲突框：服务端复制时本就会自动生成不重名的名字
+        // （Windows 的「粘贴到源文件夹」也是直接变出副本，不打断操作）。
+        // 只有移动才需要问「同名了怎么办」，因为移动无法自动改名——那个名字属于原条目。
+        if (!copy) {
+            List<VirtualFileSystem.Entry> conflicts = new ArrayList<>();
+            for (VirtualFileSystem.Entry entry : valid) {
+                if (fs.hasName(targetKey, entry.name)) {
+                    conflicts.add(entry);
+                }
             }
-        }
-        if (!conflicts.isEmpty()) {
-            conflictEntries = new ArrayList<>(valid);
-            conflictNames = new ArrayList<>();
-            for (VirtualFileSystem.Entry c : conflicts) {
-                conflictNames.add(c.name);
+            if (!conflicts.isEmpty()) {
+                conflictEntries = new ArrayList<>(valid);
+                conflictNames = new ArrayList<>();
+                for (VirtualFileSystem.Entry c : conflicts) {
+                    conflictNames.add(c.name);
+                }
+                conflictSourceKey = sourceKey;
+                conflictTargetKey = targetKey;
+                conflictCopy = false;
+                showConflictDialog(conflicts);
+                return false;
             }
-            conflictSourceKey = sourceKey;
-            conflictTargetKey = targetKey;
-            conflictCopy = copy;
-            showConflictDialog(conflicts);
-            return false;
         }
         return performMoveOrCopy(sourceKey, valid, targetKey, copy, new ArrayList<>(), new ArrayList<>());
     }
 
-    /** 实际执行批量移动/复制。replaceNames 指定要替换的冲突名，skipNames 指定要跳过的冲突名。 */
+    /** 实际执行批量移动/复制。replaceNames / skipNames 只用于**移动**时的同名冲突处理。 */
     private boolean performMoveOrCopy(String sourceKey, List<VirtualFileSystem.Entry> entries, String targetKey,
                                       boolean copy, List<String> replaceNames, List<String> skipNames) {
         List<String> ids = new ArrayList<>();
-        int count = 0;
         for (VirtualFileSystem.Entry entry : entries) {
-            boolean conflict = fs.hasName(targetKey, entry.name);
-            if (conflict && !replaceNames.contains(entry.name)) {
-                // 冲突且未选择替换：跳过（含显式跳过）。
-                continue;
+            // 复制不做冲突过滤：服务端会自动生成不重名的名字。
+            if (!copy) {
+                boolean conflict = fs.hasName(targetKey, entry.name);
+                if (conflict && !replaceNames.contains(entry.name)) {
+                    // 冲突且未选择替换：跳过（含显式跳过）。
+                    continue;
+                }
             }
             ids.add(entry.id);
-            count++;
         }
         if (ids.isEmpty()) {
             return false;
@@ -1840,7 +1857,8 @@ public final class FileExplorerController {
         } else {
             DiskClient.move(ids, targetKey);
         }
-        setStatus(copy ? t("informationera.fe.status_copied_to", count) : t("informationera.fe.status_moved", count));
+        setStatus(copy ? t("informationera.fe.status_copied_to", ids.size())
+                : t("informationera.fe.status_moved", ids.size()));
         return true;
     }
 
@@ -1876,6 +1894,11 @@ public final class FileExplorerController {
     void onViewReplaced(VirtualFileSystem view) {
         if (view != null) {
             this.fs = view;
+        }
+        // 条目引用已整体失效，正在进行的重命名必须放弃：留着输入框再提交，
+        // 用的就是指向旧视图的条目了。
+        if (renamingEntry != null) {
+            cancelRename();
         }
         // 当前所在文件夹可能在新视图里已经不存在（被删除/移动过），
         // 这时回退到根目录，避免渲染出一片空白。
@@ -2352,6 +2375,15 @@ public final class FileExplorerController {
 
     // ---------- 重命名 ----------
 
+    /**
+     * 进入重命名状态：把输入框贴到被重命名的那一行上。
+     *
+     * <p>定位依据是**文件名标签自身的矩形**（`[data-name]`），不是整行——在详细/内容视图里
+     * 整行包含图标与多列，按行定位会让输入框跑到行首、与文字错开。
+     *
+     * <p>宽度取标签的 `scrollWidth`（文本内容实际宽度），让输入框与原文案一样长，
+     * 而不是把整列撑满。
+     */
     private void beginRename(Element item, VirtualFileSystem.Entry entry) {
         Element input = document.getElementById("fe-rename-input");
         if (input == null) {
@@ -2359,16 +2391,35 @@ public final class FileExplorerController {
         }
         renamingEntry = entry;
 
-        // 优先用文件名标签的矩形来定位与定宽，而不是整行 item；否则 details 视图会定位到行首。
         Element nameEl = item != null ? item.querySelector("[data-name]") : null;
         Element.DOMRect rect = nameEl != null ? nameEl.getBoundingClientRect()
                 : (item != null ? item.getBoundingClientRect() : null);
-        if (rect == null) {
+        if (rect == null || rect.width <= 0 || rect.height <= 0) {
             cancelRename();
             return;
         }
 
+        // 文本实际宽度：scrollWidth 是内容宽度，比列宽更贴近「原文案有多长」。
+        double textWidth = nameEl != null && nameEl.scrollWidth > 0
+                ? nameEl.scrollWidth : rect.width;
+        // 左右各留一点内边距，文字不贴边框；上限防止超长名称把输入框撑出窗口。
+        double width = Math.min(420.0, Math.max(60.0, textWidth + RENAME_PADDING_X * 2 + 4.0));
+        double height = Math.max(rect.height, RENAME_MIN_HEIGHT);
+        double top = rect.top + (rect.height - height) / 2.0;
+
+        // 关键顺序：先把位置、尺寸、值都设好并把滚动归零，最后才 focus/select。
+        // AUI 的滚动是带动画的（scrollLeft 与 targetScrollLeft 分离），
+        // 如果在 select() 之后再去 setScrollLeft(0)，会播一段从末尾滚回开头的动画——
+        // 看上去就是「文字从左往右滑了一下才归位」。
         input.setValue(entry.name);
+        input.setInlineStyleProperty("left", px(rect.left - RENAME_PADDING_X));
+        input.setInlineStyleProperty("top", px(top));
+        input.setInlineStyleProperty("width", px(width));
+        input.setInlineStyleProperty("height", px(height));
+        input.setInlineStyleProperty("display", "block");
+        input.setScrollLeft(0);
+        input.setScrollTop(0);
+
         if (input instanceof com.sighs.apricityui.element.AbstractText textInput) {
             // 文件重命名时只选中主文件名（不含扩展名），文件夹或隐藏扩展名时全选。
             if (!entry.folder && showExtensions) {
@@ -2382,35 +2433,10 @@ public final class FileExplorerController {
                 textInput.select();
             }
         }
-
-        // 宽度至少容纳整个文件名，避免光标停在文件名末尾时把开头滚出视野。
-        double width = Math.max(rect.width, estimateNameWidth(entry.name));
-        input.setInlineStyleProperty("left", px(rect.left));
-        input.setInlineStyleProperty("top", px(rect.top));
-        input.setInlineStyleProperty("width", px(width));
-        input.setInlineStyleProperty("display", "block");
-        // 选区/光标不应触发文本滚动，始终从头显示。
+        // 选区/光标可能把滚动目标推到末尾，这里再显式归零一次；
+        // 由于此时已经处于「从头选中」的状态，不会再产生回滚动画。
         input.setScrollLeft(0);
         input.focus();
-    }
-
-    /** 按字符估算文件名显示宽度，保证重命名输入框能完整显示。 */
-    private static double estimateNameWidth(String name) {
-        if (name == null) {
-            return 180.0;
-        }
-        double w = 0.0;
-        for (int i = 0; i < name.length(); i++) {
-            char c = name.charAt(i);
-            if (c >= 0x1100 && (c <= 0x115F || c == 0x2329 || c == 0x232A
-                    || (c >= 0x2E80 && c <= 0x9FFF) || (c >= 0xF900 && c <= 0xFAFF)
-                    || (c >= 0xFF00 && c <= 0xFF60) || (c >= 0xFFE0 && c <= 0xFFE6))) {
-                w += 14.0; // 全角/中日韩字符
-            } else {
-                w += 8.0;  // 半角字符
-            }
-        }
-        return Math.min(420.0, Math.max(180.0, w + 20.0));
     }
 
     private void commitRename() {
@@ -2419,7 +2445,13 @@ public final class FileExplorerController {
             cancelRename();
             return;
         }
-        DiskClient.rename(renamingEntry.id, input.getValue());
+        String typed = input.getValue() == null ? "" : input.getValue().trim();
+        if (typed.isEmpty()) {
+            cancelRename();
+            setStatus(t("informationera.fe.status_rename_invalid"));
+            return;
+        }
+        DiskClient.rename(renamingEntry.id, typed);
         cancelRename();
         setStatus(t("informationera.fe.status_renamed"));
     }
@@ -2429,6 +2461,8 @@ public final class FileExplorerController {
         Element input = document.getElementById("fe-rename-input");
         if (input != null) {
             input.setInlineStyleProperty("display", "none");
+            // 清掉按行实测的尺寸，避免下次重命名时先以旧尺寸闪一帧。
+            input.removeInlineStyleProperty("height");
         }
     }
 
@@ -2791,7 +2825,7 @@ public final class FileExplorerController {
                 // 文件的「大小」在物品磁盘里就是它引用的物品数量。
                 appendPropertyRow(sb, t("informationera.fe.item_count"), formatSize(entry.count));
                 if (entry.itemId != null) {
-                    appendPropertyRow(sb, t("informationera.fe.item_type"), entry.itemId);
+                    appendPropertyRow(sb, t("informationera.fe.item_id"), entry.itemId);
                 }
             }
             if (entry.shortcutTargetKey != null && fs.folder(entry.shortcutTargetKey) != null) {
