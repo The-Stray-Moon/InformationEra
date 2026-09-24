@@ -48,6 +48,8 @@
   "informationera.fe.properties": "属性",
 
   "informationera.fe.open": "打开",
+  "informationera.fe.open_in_new_tab": "在新标签页中打开",
+  "informationera.fe.open_in_new_window": "在新窗口中打开",
   "informationera.fe.open_with": "打开方式",
   "informationera.fe.notepad": "记事本",
   "informationera.fe.default_app": "默认应用",
@@ -215,6 +217,8 @@
   "informationera.folder.weapons": "武器",
 
   "informationera.msg.opened": "磁盘已就绪",
+  "informationera.tooltip.alt_deposit": "Alt+左键 存入",
+  "informationera.tooltip.alt_withdraw": "Alt+左键 取出",
   "informationera.msg.no_disk": "磁盘不可用",
   "informationera.msg.deposited": "已存入 %s 个",
   "informationera.msg.deposited_kinds": "已存入 %s 个物品（%s 种）",
@@ -222,6 +226,7 @@
   "informationera.msg.nothing_to_deposit": "没有可存入的物品",
   "informationera.msg.withdrawn": "已取出 %s 个",
   "informationera.msg.not_enough": "库存不足：%s",
+  "informationera.msg.inventory_full": "物品栏放不下",
   "informationera.msg.slot_full": "目标槽位已满",
   "informationera.msg.slot_occupied": "目标槽位已有其它物品",
   "informationera.msg.slot_rejected": "该槽位不接受此物品",

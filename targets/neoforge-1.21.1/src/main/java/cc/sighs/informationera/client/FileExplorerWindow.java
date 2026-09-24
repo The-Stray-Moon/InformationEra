@@ -283,6 +283,21 @@ public final class FileExplorerWindow {
         return windows.size();
     }
 
+    /**
+     * 是否有资源管理器窗口正在**显示**（已打开且没被最小化）。
+     *
+     * <p>供「Alt+左键存入」的提示文案判断：只有窗口真的看得见时，那个提示才对玩家有意义。
+     * 最小化的窗口只剩任务栏任务标，不该再往物品提示里塞操作说明。
+     */
+    public static boolean isAnyWindowShowing() {
+        for (FileExplorerController controller : windows) {
+            if (controller.isOpen() && !controller.isMinimized()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public static List<FileExplorerController> getWindows() {
         return windows;
     }

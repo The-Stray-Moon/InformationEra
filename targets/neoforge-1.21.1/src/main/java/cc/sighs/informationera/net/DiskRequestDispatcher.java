@@ -81,6 +81,8 @@ public final class DiskRequestDispatcher {
                 return deposit(player, disk, args);
             case RequestType.WITHDRAW:
                 return withdraw(player, disk, args);
+            case RequestType.WITHDRAW_TO_INVENTORY:
+                return withdrawToInventory(player, disk, args);
             default:
                 return OpResult.fail("informationera.msg.unknown_request", String.valueOf(packet.kind()));
         }
@@ -215,6 +217,64 @@ public final class DiskRequestDispatcher {
         }
         slot.setChanged();
         menu.broadcastChanges();
+        return OpResult.ok("informationera.msg.withdrawn", String.valueOf(taken));
+    }
+
+    /**
+     * 取出到玩家物品栏：参数 {@code itemId}, {@code nbt}，可选 {@code wanted}。
+     *
+     * <p>用原版的 {@code Player#addItem(ItemStack)} 完成插入——它内部会**先并入已有堆叠、
+     * 再找空槽**，合并行为与拾取物品完全一致，不需要自己遍历槽位。
+     *
+     * <p>顺序上**先试着放进物品栏、再按实际放入的数量从磁盘扣**，而不是反过来：
+     * {@code withdraw} 在把库存取空时会一并移除所有引用它的文件（文件是库存的别名），
+     * 若先取后放、放不下再退回，退回时会因「已无文件」而在根目录新建一个——
+     * 物品就会从原文件夹跳走，多个别名也会被合并掉。先试放就不存在退回这一步。
+     *
+     * <p>数量默认取该物品的一个堆叠上限（和拖到容器槽位时「按槽位上限取」是同一套语义）。
+     */
+    private static OpResult withdrawToInventory(ServerPlayer player, PlayerDisk disk, List<String> args) {
+        String itemId = arg(args, 0, "");
+        String nbt = arg(args, 1, "");
+        if (itemId.isEmpty()) {
+            return OpResult.fail("informationera.msg.invalid_amount");
+        }
+        ItemKey key = new ItemKey(itemId, nbt);
+
+        ItemStack probe = ItemStacks.stackOf(key, 1L, player.registryAccess());
+        if (probe.isEmpty()) {
+            return OpResult.fail("informationera.msg.unknown_item", itemId);
+        }
+        int maxStack = Math.max(1, probe.getMaxStackSize());
+
+        long available = disk.quantityOf(key);
+        if (available <= 0L) {
+            return OpResult.fail("informationera.msg.not_enough", key.itemId());
+        }
+        // 一次取出一个堆叠的量；不可堆叠物品就是 1。
+        long wanted = parseLong(arg(args, 2, "0"), 0L);
+        if (wanted <= 0L) {
+            wanted = maxStack;
+        }
+        wanted = Math.min(Math.min(wanted, maxStack), available);
+
+        ItemStack produced = ItemStacks.stackOf(key, wanted, player.registryAccess());
+        if (produced.isEmpty()) {
+            return OpResult.fail("informationera.msg.unknown_item", itemId);
+        }
+        produced.setCount((int) wanted);
+
+        // 试着放进物品栏：addItem 会就地改写传入的栈，调用后它的数量就是没能放进去的部分。
+        player.addItem(produced);
+        long moved = wanted - produced.getCount();
+        if (moved <= 0L) {
+            return OpResult.fail("informationera.msg.inventory_full");
+        }
+
+        // 只从磁盘扣掉真正进了物品栏的数量。
+        // 上面已确认 available >= wanted >= moved，所以这里必定取足；取不足则说明库存被
+        // 并发改动过，此时把多发出去的部分丢掉是不可能的，只能记下来——但同一 tick 内不会发生。
+        long taken = disk.withdraw(key, moved);
         return OpResult.ok("informationera.msg.withdrawn", String.valueOf(taken));
     }
 

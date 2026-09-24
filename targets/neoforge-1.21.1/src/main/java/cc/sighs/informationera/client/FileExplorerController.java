@@ -726,8 +726,16 @@ public final class FileExplorerController {
                 newTab();
             } else if (ctrl && "w".equalsIgnoreCase(key)) {
                 closeTab(activeTab);
+            } else if (ctrl && "Tab".equals(key)) {
+                // Windows：Ctrl+Tab 向后切换标签页，Ctrl+Shift+Tab 向前。
+                cycleTab(shift ? -1 : 1);
+            } else if (ctrl && !shift && !alt && key.length() == 1
+                    && key.charAt(0) >= '1' && key.charAt(0) <= '9') {
+                // Windows：Ctrl+数字 直接切到第 n 个标签页（1 起算）。
+                switchToTabByNumber(key.charAt(0) - '0');
             } else if (ctrl && "n".equalsIgnoreCase(key)) {
-                FileExplorerWindow.open();
+                // 与资源管理器一致：在当前所在文件夹开一个新窗口，而不是回到根目录。
+                FileExplorerWindow.openAt(currentKey);
             } else if (ctrl && "a".equalsIgnoreCase(key)) {
                 selectAll();
             } else if (ctrl && "c".equalsIgnoreCase(key)) {
@@ -742,6 +750,9 @@ public final class FileExplorerController {
                 redo();
             } else if (ctrl && ("f".equalsIgnoreCase(key) || "e".equalsIgnoreCase(key))) {
                 focusSearch();
+            } else if ("F4".equalsIgnoreCase(key) && !ctrl && !alt && !shift) {
+                // Windows：F4 选中地址栏。
+                beginAddressEdit();
             } else if ("F5".equalsIgnoreCase(key) || (ctrl && "r".equalsIgnoreCase(key))) {
                 renderContent();
             } else if (alt && ("ArrowLeft".equalsIgnoreCase(key) || "Left".equalsIgnoreCase(key))) {
@@ -1168,6 +1179,17 @@ public final class FileExplorerController {
         for (Element tabEl : strip.querySelectorAll(".fe-tab[data-tab]")) {
             tabEl.addEventListener("mousedown", e -> {
                 e.stopPropagation();
+                // 中键点标签页：关闭它（Windows / 浏览器习惯）。
+                if (e instanceof MouseEvent me && me.button == 2) {
+                    String idx = tabEl.getAttribute("data-tab");
+                    if (idx != null) {
+                        try {
+                            closeTab(Integer.parseInt(idx));
+                        } catch (NumberFormatException ignored) {
+                        }
+                    }
+                    return;
+                }
                 if (e instanceof MouseEvent me && me.button == 0) {
                     String idx = tabEl.getAttribute("data-tab");
                     if (idx != null) {
@@ -1264,6 +1286,30 @@ public final class FileExplorerController {
         renderAllAfterTabChange();
     }
 
+    /**
+     * 循环切换标签页（Windows：Ctrl+Tab 向后、Ctrl+Shift+Tab 向前）。
+     *
+     * @param step +1 向后，-1 向前；到头后回绕
+     */
+    private void cycleTab(int step) {
+        if (tabs.size() <= 1) {
+            return;
+        }
+        switchToTab(Math.floorMod(activeTab + step, tabs.size()));
+    }
+
+    /**
+     * 切到第 n 个标签页（Windows：Ctrl+数字，1 起算）。
+     *
+     * <p>与资源管理器一致：编号超出标签数量时不做任何事，而不是切到最后一个。
+     */
+    private void switchToTabByNumber(int number) {
+        int index = number - 1;
+        if (index >= 0 && index < tabs.size()) {
+            switchToTab(index);
+        }
+    }
+
     private int tabIndexAt(double mouseX) {
         for (Element tabEl : document.querySelectorAll(".fe-tab[data-tab]")) {
             String idx = tabEl.getAttribute("data-tab");
@@ -1302,10 +1348,28 @@ public final class FileExplorerController {
     }
 
     private void newTab() {
+        addTabAt(currentKey);
+    }
+
+    /**
+     * 在当前窗口里开一个新标签页并停在指定文件夹。
+     *
+     * <p>对应右键菜单的「在新标签页中打开」：与 {@link #newTab()} 的区别只是落点——
+     * 那个停在当前所在文件夹，这个停在给定的那个。
+     */
+    void openInNewTab(String key) {
+        if (key == null || fs.folder(key) == null) {
+            return;
+        }
+        addTabAt(key);
+    }
+
+    /** 新增一个停在指定文件夹的标签页，并切过去。 */
+    private void addTabAt(String key) {
         saveActiveTab();
         Tab tab = new Tab();
-        tab.currentKey = currentKey;
-        VirtualFileSystem.Folder folder = fs.folder(currentKey);
+        tab.currentKey = key;
+        VirtualFileSystem.Folder folder = fs.folder(key);
         tab.title = folder != null ? folder.name : t("informationera.fe.title");
         tabs.add(tab);
         activeTab = tabs.size() - 1;
@@ -1997,35 +2061,49 @@ public final class FileExplorerController {
 
     // ---------- 右键菜单（自绘，Ore 主题） ----------
 
-    private record CtxEntry(int kind, String label, boolean danger, boolean checked, Runnable action, List<CtxEntry> children) {
+    /**
+     * 右键菜单的一项。
+     *
+     * @param shortcut 右对齐显示的快捷键提示（空串表示不显示）；与键盘处理里的绑定保持一致
+     */
+    private record CtxEntry(int kind, String label, String shortcut, boolean danger, boolean checked,
+                            Runnable action, List<CtxEntry> children) {
         static CtxEntry header(String label) {
-            return new CtxEntry(0, label, false, false, null, null);
+            return new CtxEntry(0, label, "", false, false, null, null);
         }
 
         static CtxEntry separator() {
-            return new CtxEntry(1, "", false, false, null, null);
+            return new CtxEntry(1, "", "", false, false, null, null);
         }
 
         static CtxEntry action(String label, Runnable action) {
-            return new CtxEntry(2, label, false, false, action, null);
+            return new CtxEntry(2, label, "", false, false, action, null);
+        }
+
+        static CtxEntry action(String label, String shortcut, Runnable action) {
+            return new CtxEntry(2, label, shortcut, false, false, action, null);
         }
 
         static CtxEntry actionChecked(String label, boolean checked, Runnable action) {
-            return new CtxEntry(2, label, false, checked, action, null);
+            return new CtxEntry(2, label, "", false, checked, action, null);
         }
 
         static CtxEntry actionDanger(String label, Runnable action) {
-            return new CtxEntry(2, label, true, false, action, null);
+            return new CtxEntry(2, label, "", true, false, action, null);
+        }
+
+        static CtxEntry actionDanger(String label, String shortcut, Runnable action) {
+            return new CtxEntry(2, label, shortcut, true, false, action, null);
         }
 
         static CtxEntry submenu(String label, List<CtxEntry> children) {
-            return new CtxEntry(3, label, false, false, null, children);
+            return new CtxEntry(3, label, "", false, false, null, children);
         }
     }
 
     private void showWindowContextMenu(double x, double y) {
         List<CtxEntry> entries = new ArrayList<>();
-        entries.add(CtxEntry.action(t("informationera.fe.new_tab"), this::newTab));
+        entries.add(CtxEntry.action(t("informationera.fe.new_tab"), "Ctrl+T", this::newTab));
         entries.add(CtxEntry.action(t("informationera.fe.maximize"), this::toggleMaximize));
         entries.add(CtxEntry.separator());
         entries.add(CtxEntry.actionDanger(t("informationera.fe.close_window"), this::closeWindow));
@@ -2040,21 +2118,21 @@ public final class FileExplorerController {
             entries.add(CtxEntry.separator());
             entries.add(CtxEntry.action(t("informationera.fe.refresh"), this::renderContent));
             entries.add(CtxEntry.separator());
-            entries.add(CtxEntry.action(t("informationera.fe.properties"), () -> setStatus(pathText(currentKey))));
+            entries.add(CtxEntry.action(t("informationera.fe.properties"), "Alt+Enter", this::showProperties));
             openContextMenu(x, y, entries);
             return;
         }
-        entries.add(CtxEntry.action(t("informationera.fe.refresh"), this::renderContent));
-        entries.add(CtxEntry.action(t("informationera.fe.new_folder"), this::createFolder));
+        entries.add(CtxEntry.action(t("informationera.fe.refresh"), "F5", this::renderContent));
+        entries.add(CtxEntry.action(t("informationera.fe.new_folder"), "Ctrl+Shift+N", this::createFolder));
         entries.add(CtxEntry.separator());
-        entries.add(CtxEntry.action(t("informationera.fe.paste"), this::paste));
-        entries.add(CtxEntry.action(t("informationera.fe.undo"), this::undo));
-        entries.add(CtxEntry.action(t("informationera.fe.redo"), this::redo));
+        entries.add(CtxEntry.action(t("informationera.fe.paste"), "Ctrl+V", this::paste));
+        entries.add(CtxEntry.action(t("informationera.fe.undo"), "Ctrl+Z", this::undo));
+        entries.add(CtxEntry.action(t("informationera.fe.redo"), "Ctrl+Y", this::redo));
         entries.add(CtxEntry.separator());
-        entries.add(CtxEntry.action(t("informationera.fe.select_all"), this::selectAll));
+        entries.add(CtxEntry.action(t("informationera.fe.select_all"), "Ctrl+A", this::selectAll));
         entries.add(CtxEntry.action(t("informationera.fe.invert_selection"), this::invertSelection));
         entries.add(CtxEntry.separator());
-        entries.add(CtxEntry.action(t("informationera.fe.properties"), () -> setStatus(pathText(currentKey))));
+        entries.add(CtxEntry.action(t("informationera.fe.properties"), "Alt+Enter", this::showProperties));
         openContextMenu(x, y, entries);
     }
 
@@ -2069,14 +2147,23 @@ public final class FileExplorerController {
             updateStatusBar();
         }
         List<CtxEntry> entries = new ArrayList<>();
-        entries.add(CtxEntry.action(t("informationera.fe.open"), () -> openEntry(entry)));
-        entries.add(CtxEntry.submenu(t("informationera.fe.open_with"), List.of(
-                CtxEntry.action(t("informationera.fe.notepad"), () -> setStatus(t("informationera.fe.status_opened_notepad", entry.name))),
-                CtxEntry.action(t("informationera.fe.default_app"), () -> openEntry(entry)))));
-        entries.add(CtxEntry.action(t("informationera.fe.rename"), () -> beginRename(item, entry)));
+        entries.add(CtxEntry.action(t("informationera.fe.open"), "Enter", () -> openEntry(entry)));
+        // 文件夹才能「在新标签页/新窗口中打开」，与资源管理器一致。
+        // 资源管理器里这两项**没有**键盘快捷键（只能走菜单或中键），所以不显示提示。
+        if (entry.folder && entry.childKey != null) {
+            String key = entry.childKey;
+            entries.add(CtxEntry.action(t("informationera.fe.open_in_new_tab"), () -> openInNewTab(key)));
+            entries.add(CtxEntry.action(t("informationera.fe.open_in_new_window"), () -> openInNewWindow(key)));
+        } else {
+            // 「打开方式」只对文件有意义，文件夹不该出现这一项。
+            entries.add(CtxEntry.submenu(t("informationera.fe.open_with"), List.of(
+                    CtxEntry.action(t("informationera.fe.notepad"), () -> setStatus(t("informationera.fe.status_opened_notepad", entry.name))),
+                    CtxEntry.action(t("informationera.fe.default_app"), () -> openEntry(entry)))));
+        }
+        entries.add(CtxEntry.action(t("informationera.fe.rename"), "F2", () -> beginRename(item, entry)));
         entries.add(CtxEntry.separator());
-        entries.add(CtxEntry.action(t("informationera.fe.cut"), this::cut));
-        entries.add(CtxEntry.action(t("informationera.fe.copy"), this::copy));
+        entries.add(CtxEntry.action(t("informationera.fe.cut"), "Ctrl+X", this::cut));
+        entries.add(CtxEntry.action(t("informationera.fe.copy"), "Ctrl+C", this::copy));
         entries.add(CtxEntry.action(t("informationera.fe.copy_path"), () -> copyPath(entry)));
         entries.add(CtxEntry.action(t("informationera.fe.create_shortcut"), () -> createShortcut(entry)));
         if (t("informationera.fe.shortcut_type").equals(entry.type) && entry.shortcutTargetKey != null) {
@@ -2096,12 +2183,13 @@ public final class FileExplorerController {
         if (DiskFolder.RECYCLE_ID.equals(currentKey)) {
             // 回收站里两个动作并存：还原回原位置，或彻底删除（真丢物品）。
             entries.add(CtxEntry.action(t("informationera.fe.restore"), () -> restoreRecycleEntry(entry)));
-            entries.add(CtxEntry.actionDanger(t("informationera.fe.permanently_delete"), this::deletePermanently));
+            entries.add(CtxEntry.actionDanger(t("informationera.fe.permanently_delete"), "Shift+Delete",
+                    this::deletePermanently));
         } else {
-            entries.add(CtxEntry.actionDanger(t("informationera.fe.delete"), this::delete));
+            entries.add(CtxEntry.actionDanger(t("informationera.fe.delete"), "Delete", this::delete));
         }
         entries.add(CtxEntry.separator());
-        entries.add(CtxEntry.action(t("informationera.fe.properties"), () -> setStatus(entry.name + " — " + entry.type + "，" + (entry.folder ? t("informationera.fe.folder") : formatSize(entry.size)))));
+        entries.add(CtxEntry.action(t("informationera.fe.properties"), "Alt+Enter", this::showProperties));
         openContextMenu(x, y, entries);
     }
 
@@ -2335,6 +2423,10 @@ public final class FileExplorerController {
                       .append("\" data-i=\"").append(index).append("\">");
                     sb.append("<span class=\"fe-ctx-mark\">").append(entry.checked ? "✓" : "").append("</span>");
                     sb.append("<span class=\"fe-ctx-label\">").append(escape(entry.label)).append("</span>");
+                    // 快捷键提示右对齐，与资源管理器一致。
+                    if (entry.shortcut != null && !entry.shortcut.isEmpty()) {
+                        sb.append("<span class=\"fe-ctx-shortcut\">").append(escape(entry.shortcut)).append("</span>");
+                    }
                     sb.append("</div>");
                 }
                 case 3 -> {
@@ -2918,6 +3010,22 @@ public final class FileExplorerController {
         }
     }
 
+    // ---------- 在新标签页 / 新窗口中打开 ----------
+
+    /** 在新窗口里打开指定文件夹。 */
+    void openInNewWindow(String key) {
+        if (key == null || fs.folder(key) == null) {
+            return;
+        }
+        FileExplorerWindow.openAt(key);
+    }
+
+    /**
+     * 「在新标签页 / 新窗口中打开」的目标文件夹。
+     *
+     * <p>优先取选中的文件夹（多选时取第一个）；没有选中文件夹时退回当前所在文件夹，
+     * 这样快捷键在两种情况下都有意义，与资源管理器的习惯一致。
+     */
     // ---------- 视图 / 排序 / 布局 ----------
 
     private void setViewMode(String mode) {
@@ -4514,6 +4622,20 @@ public final class FileExplorerController {
                     if (entry == null) {
                         return;
                     }
+                    // Alt + 左键：把物品取出到玩家物品栏。这是一次动作，不进入拖拽、
+                    // 也不改变选中集，避免顺手把选中状态搅乱。
+                    if (me.button == 0 && ContainerSlotInterop.isAltDown()) {
+                        withdrawToInventory(entry);
+                        return;
+                    }
+                    // 中键点文件夹：在新标签页中打开（与资源管理器一致）。
+                    // 中键不参与拖拽，处理完就返回。
+                    if (me.button == 2) {
+                        if (entry.folder && entry.childKey != null) {
+                            openInNewTab(entry.childKey);
+                        }
+                        return;
+                    }
                     // AUI 的 MouseEvent.button 使用 GLFW 按钮号：0=左键，1=右键，2=中键。
                     if (me.button == 0 || me.button == 1) {
                         boolean right = me.button == 1;
@@ -4600,6 +4722,13 @@ public final class FileExplorerController {
         boolean ctrl = event instanceof MouseEvent me && me.controlKey;
         boolean shift = event instanceof MouseEvent me && me.shiftKey;
         int clickCount = event instanceof MouseEvent me ? me.clickCount : 1;
+
+        // Ctrl + 双击文件夹：在新窗口中打开（Windows 行为）。
+        // 只对文件夹生效——文件没有「在新窗口打开」的语义，落到下面的选中逻辑即可。
+        if (ctrl && !shift && clickCount >= 2 && entry.folder && entry.childKey != null) {
+            openInNewWindow(entry.childKey);
+            return;
+        }
 
         // 双击（系统合并，clickCount>=2）：打开（Windows 行为）。
         if (!ctrl && !shift && clickCount >= 2) {
@@ -4738,10 +4867,35 @@ public final class FileExplorerController {
     }
 
     private String metadataText(VirtualFileSystem.Entry entry) {
-        return entry.name
-                + "\n" + t("informationera.fe.detail_type", entry.type)
-                + "\n" + (entry.folder ? t("informationera.fe.folder") : t("informationera.fe.detail_size", formatSize(entry.size)))
-                + "\n" + t("informationera.fe.detail_modified_short", entry.modified);
+        StringBuilder sb = new StringBuilder(entry.name);
+        sb.append('\n').append(t("informationera.fe.detail_type", entry.type));
+        sb.append('\n').append(entry.folder
+                ? t("informationera.fe.folder")
+                : t("informationera.fe.detail_size", formatSize(entry.size)));
+        sb.append('\n').append(t("informationera.fe.detail_modified_short", entry.modified));
+        if (!entry.folder) {
+            // 物品条目补一行操作说明：Alt+左键能把它取到玩家物品栏。
+            sb.append('\n').append(t("informationera.tooltip.alt_withdraw"));
+        }
+        return sb.toString();
+    }
+
+    /**
+     * 把资源管理器里的一个物品条目取出到玩家物品栏。
+     *
+     * <p>数量交给服务端按该物品的一个堆叠上限决定（可堆叠即 64，不可堆叠即 1），
+     * 合并由原版的物品栏插入逻辑完成。客户端只发意图。
+     */
+    private void withdrawToInventory(VirtualFileSystem.Entry entry) {
+        if (entry == null || entry.folder || entry.itemKey == null) {
+            return;
+        }
+        if (entry.count <= 0L) {
+            // 库存已经空了（文件还在，但数量为 0），没什么可取的。
+            setStatus(t("informationera.msg.not_enough", entry.name));
+            return;
+        }
+        DiskClient.withdrawToInventory(entry.itemKey, 0L);
     }
 
     private void hideTooltip() {

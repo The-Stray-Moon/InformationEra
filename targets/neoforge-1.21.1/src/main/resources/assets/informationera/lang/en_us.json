@@ -48,6 +48,8 @@
   "informationera.fe.properties": "Properties",
 
   "informationera.fe.open": "Open",
+  "informationera.fe.open_in_new_tab": "Open in new tab",
+  "informationera.fe.open_in_new_window": "Open in new window",
   "informationera.fe.open_with": "Open with",
   "informationera.fe.notepad": "Notepad",
   "informationera.fe.default_app": "Default app",
@@ -215,6 +217,8 @@
   "informationera.folder.weapons": "Weapons",
 
   "informationera.msg.opened": "Disk ready",
+  "informationera.tooltip.alt_deposit": "Alt+Left click to store",
+  "informationera.tooltip.alt_withdraw": "Alt+Left click to take out",
   "informationera.msg.no_disk": "Disk unavailable",
   "informationera.msg.deposited": "Deposited %s",
   "informationera.msg.deposited_kinds": "Deposited %s items (%s kinds)",
@@ -222,6 +226,7 @@
   "informationera.msg.nothing_to_deposit": "Nothing to deposit",
   "informationera.msg.withdrawn": "Withdrew %s",
   "informationera.msg.not_enough": "Not enough in stock: %s",
+  "informationera.msg.inventory_full": "Your inventory is full",
   "informationera.msg.slot_full": "Target slot is full",
   "informationera.msg.slot_occupied": "Target slot holds another item",
   "informationera.msg.slot_rejected": "That slot rejects this item",

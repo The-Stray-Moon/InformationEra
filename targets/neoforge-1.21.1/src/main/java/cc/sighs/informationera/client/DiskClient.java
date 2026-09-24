@@ -120,6 +120,19 @@ public final class DiskClient {
     }
 
     /**
+     * 把磁盘里的一种物品取出到玩家物品栏（自动合并进已有堆叠）。
+     *
+     * @param wanted 想取出的数量；传 0 表示由服务端按该物品的一个堆叠上限决定
+     */
+    public static void withdrawToInventory(ItemKey key, long wanted) {
+        if (key == null) {
+            return;
+        }
+        send(new DiskRequestPacket(RequestType.WITHDRAW_TO_INVENTORY,
+                key.itemId(), key.nbt(), String.valueOf(Math.max(0L, wanted))));
+    }
+
+    /**
      * 目标文件夹决议：显式指定 &gt; 聚焦窗口当前文件夹 &gt; 根目录。
      *
      * <p>最后那一条就是「没打开资源管理器窗口时物品进入根目录」的落地处。

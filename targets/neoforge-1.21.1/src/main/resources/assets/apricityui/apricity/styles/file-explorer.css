@@ -1310,6 +1310,13 @@
     text-overflow: ellipsis;
 }
 
+/* 快捷键提示：右对齐、弱化配色，与资源管理器的右键菜单一致。 */
+.fe-ctx-shortcut {
+    flex: 0 0 auto;
+    margin-left: 16px;
+    color: var(--ore-ink-muted);
+}
+
 .fe-ctx-item:hover,
 .fe-ctx-item.ctx-focused {
     color: #ffffff;

@@ -32,6 +32,8 @@ public final class RequestType {
     public static final int WITHDRAW = 11;
     /** 设置磁盘名称。 */
     public static final int RENAME_DISK = 12;
+    /** 把磁盘里的物品取出到玩家物品栏（自动合并进已有堆叠）。 */
+    public static final int WITHDRAW_TO_INVENTORY = 13;
 
     private RequestType() {
     }
