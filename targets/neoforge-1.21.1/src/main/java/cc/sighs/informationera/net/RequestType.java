@@ -34,6 +34,10 @@ public final class RequestType {
     public static final int RENAME_DISK = 12;
     /** 把磁盘里的物品取出到玩家物品栏（自动合并进已有堆叠）。 */
     public static final int WITHDRAW_TO_INVENTORY = 13;
+    /** 换槽：设备插槽（插卡区 / 功能模块）与玩家物品栏的一个槽位整体互换。 */
+    public static final int SWAP_SLOT = 14;
+    /** 只问一次设备与磁盘状态，不产生任何变更、也不报错。 */
+    public static final int STATUS = 15;
 
     private RequestType() {
     }

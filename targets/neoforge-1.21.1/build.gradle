@@ -53,11 +53,18 @@ sourceSets.main.output.dir(
 repositories {
     mavenCentral()
     maven { url = 'https://maven.sighs.cc/repository/maven-public/' }
+    // Curios（饰品槽）的官方 maven 是 maven.theillusivec4.top，但那个域名在部分网络下
+    // 会被连接重置，这里改走 Modrinth 的 maven——同一个发布 jar，坐标不同而已。
+    maven { url = 'https://api.modrinth.com/maven' }
 }
 
 dependencies {
     implementation "com.sighs:ApricityUI-neoforge-1.21.1:1.2.4-hotfix"
     implementation project(':common')
+    // Curios：物品要做成饰品、服务端要判断「是否装备」，都需要它的 API。
+    // 按官方推荐拆开——编译只拿 API，运行期才需要本体（开发环境靠 runtimeOnly 带上）。
+    compileOnly "maven.modrinth:curios:${curios_version}"
+    runtimeOnly "maven.modrinth:curios:${curios_version}"
 }
 
 tasks.named('processResources', ProcessResources).configure {

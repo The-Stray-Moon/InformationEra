@@ -132,6 +132,33 @@ public final class DiskClient {
                 key.itemId(), key.nbt(), String.valueOf(Math.max(0L, wanted))));
     }
 
+    // ---------------------------------------------------------------- 设备插槽
+
+    /**
+     * 问一次设备与磁盘状态。
+     *
+     * <p>不产生任何变更、也不会报错（没插卡时只是回一份空状态），所以可以放心地在进世界、
+     * 开容器界面时随手调用，用不着担心弹提示。
+     */
+    public static void requestStatus() {
+        send(new DiskRequestPacket(RequestType.STATUS));
+    }
+
+    /**
+     * 把设备插槽与玩家物品栏的一个槽位整体互换。
+     *
+     * <p>这是唯一一个没插卡也能发的请求——插卡本身就是这么插进去的。
+     *
+     * @param slotId         设备槽位标识：{@code card} 或 {@code module0}/{@code module1}
+     * @param inventoryIndex 玩家物品栏自己的容器下标（0–35 是快捷栏与主物品栏）
+     */
+    public static void swapSlot(String slotId, int inventoryIndex) {
+        if (slotId == null || slotId.isEmpty() || inventoryIndex < 0) {
+            return;
+        }
+        send(new DiskRequestPacket(RequestType.SWAP_SLOT, slotId, String.valueOf(inventoryIndex)));
+    }
+
     /**
      * 目标文件夹决议：显式指定 &gt; 聚焦窗口当前文件夹 &gt; 根目录。
      *
@@ -174,6 +201,10 @@ public final class DiskClient {
      * 由 {@link InformationEraClientEvents} 在客户端初始化时注册到网络层。
      */
     public static void onStateUpdated(PlayerDisk mirror, boolean ok, String messageKey, String messageArg) {
+        // 卡被拔掉之后资源管理器就没盘可看了，把窗口一并收掉，免得留个空壳在屏幕上。
+        if (!DiskStateHandler.cardInserted() && FileExplorerWindow.windowCount() > 0) {
+            FileExplorerWindow.closeAll();
+        }
         HolderLookup.Provider registries = registryProvider();
         Set<String> cut = FileExplorerWindow.cutIds();
         VirtualFileSystem view = VirtualFileSystem.project(mirror, registries, cut);
@@ -197,7 +228,7 @@ public final class DiskClient {
         }
     }
 
-    static HolderLookup.Provider registryProvider() {
+    public static HolderLookup.Provider registryProvider() {
         Minecraft mc = Minecraft.getInstance();
         if (mc.level != null) {
             return mc.level.registryAccess();

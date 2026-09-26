@@ -7,10 +7,18 @@
     <link rel="stylesheet" href="/styles/file-explorer.css">
 </head>
 <body class="ore-theme fe-trigger-body">
-    <button class="icon-button fe-trigger-btn" id="fe-trigger-btn" type="button" aria-label="打开文件资源管理器">
+    <!-- 开始菜单：装备量子坍缩反应炉后才显示。 -->
+    <button class="icon-button fe-taskbar-btn fe-start-btn" id="fe-start-btn" type="button" aria-label="开始菜单">
+        <svg viewBox="0 0 24 24"><path d="M3 3h8v8H3zM13 3h8v8h-8zM3 13h8v8H3zM13 13h8v8h-8z" fill="currentColor"/></svg>
+    </button>
+
+    <!-- 资源管理器：插卡区里有储存卡后才显示，紧挨在开始菜单右边。 -->
+    <button class="icon-button fe-taskbar-btn fe-explorer-btn" id="fe-explorer-btn" type="button" aria-label="打开文件资源管理器">
         <svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v11H3z" fill="currentColor"/></svg>
         <span class="fe-taskbar-badge" id="fe-taskbar-badge"></span>
     </button>
+
+    <div class="fe-start-panel" id="fe-start-panel"></div>
 
     <div class="fe-drag-ghost" id="fe-global-drag-ghost"></div>
 

@@ -1,0 +1,6 @@
+{
+  "parent": "minecraft:item/generated",
+  "textures": {
+    "layer0": "informationera:item/quantum_collapse_reactor"
+  }
+}

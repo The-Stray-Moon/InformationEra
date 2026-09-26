@@ -1,5 +1,6 @@
 package cc.sighs.informationera.client;
 
+import cc.sighs.informationera.net.DiskStateHandler;
 import com.sighs.apricityui.ApricityUI;
 import com.sighs.apricityui.init.Document;
 import com.sighs.apricityui.init.Element;
@@ -67,6 +68,11 @@ public final class FileExplorerWindow {
 
     /** 每次调用创建一个新窗口。 */
     public static void open() {
+        // 没有插卡就没有盘可看：资源管理器必须靠设备里那张储存卡才打得开。
+        if (!DiskStateHandler.cardInserted()) {
+            DiskClient.showMessage("informationera.msg.no_card", null);
+            return;
+        }
         if (fs == null) {
             fs = VirtualFileSystem.create();
         }
@@ -128,16 +134,11 @@ public final class FileExplorerWindow {
         return windows.isEmpty() ? null : windows.get(windows.size() - 1);
     }
 
-    /** 记录最近访问路径（去重，最近在前）。写入客户端配置，重启后仍在。 */
-    public static void recordRecentPath(String key) {
-        ExplorerPreferences.recordRecent(key);
-    }
-
-    public static List<String> getRecentPaths() {
-        return ExplorerPreferences.recent();
-    }
-
-    /** 任务标右键的 Jump List：打开新窗口 / 最近路径。 */
+    /**
+     * 任务栏右键的 Jump List：打开新窗口 / 快速访问里的路径。
+     *
+     * <p>和 Windows 一样，固定项与常用项放在同一份跳转列表里，固定项排在前面。
+     */
     public static void showJumpList(Document triggerDoc, double x, double y) {
         Element menu = triggerDoc.getElementById("fe-jump-list");
         if (menu == null) {
@@ -146,11 +147,11 @@ public final class FileExplorerWindow {
         StringBuilder sb = new StringBuilder();
         sb.append("<div class=\"fe-jump-item\" data-action=\"new\">").append(t("informationera.fe.open_new_window")).append("</div>");
         sb.append("<div class=\"fe-jump-sep\"></div>");
-        List<String> recent = ExplorerPreferences.recent();
-        if (recent.isEmpty()) {
+        List<String> entries = ExplorerPreferences.quickAccess();
+        if (entries.isEmpty()) {
             sb.append("<div class=\"fe-jump-item fe-jump-disabled\">").append(t("informationera.fe.no_recent")).append("</div>");
         } else {
-            for (String key : recent) {
+            for (String key : entries) {
                 VirtualFileSystem.Folder folder = fs != null ? fs.folder(key) : null;
                 String label = folder != null ? folder.name : key;
                 sb.append("<div class=\"fe-jump-item\" data-path=\"").append(FileExplorerController.escape(key))

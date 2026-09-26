@@ -20,9 +20,11 @@ public final class InformationEraNeoForge121 {
     private int saveTimer;
 
     public InformationEraNeoForge121(IEventBus modEventBus, net.neoforged.fml.ModContainer modContainer, Dist dist) {
+        // 物品注册两端都要做：客户端也要有物品定义才能画出图标。
+        cc.sighs.informationera.item.ModItems.register(modEventBus);
         if (dist.isClient()) {
             InformationEraClientEvents.register(modEventBus);
-            // 客户端偏好（固定项、最近访问）落盘在 config/informationera-client.toml。
+            // 客户端偏好（快速访问的固定项、常用文件夹记录）落盘在 config/informationera-client.toml。
             modContainer.registerConfig(net.neoforged.fml.config.ModConfig.Type.CLIENT,
                     cc.sighs.informationera.client.ExplorerPreferences.SPEC);
         }

@@ -5,26 +5,39 @@ import cc.sighs.informationera.disk.DiskService;
 import cc.sighs.informationera.disk.ItemKey;
 import cc.sighs.informationera.disk.OpResult;
 import cc.sighs.informationera.disk.PlayerDisk;
+import cc.sighs.informationera.item.StorageCardItem;
 import cc.sighs.informationera.server.PlayerDiskStore;
+import cc.sighs.informationera.util.DeviceSlots;
+import cc.sighs.informationera.util.DiskAccess;
 import cc.sighs.informationera.util.ItemStacks;
 import com.sighs.apricityui.network.api.INetworkContext;
 import com.sighs.apricityui.network.api.NetworkManager;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.inventory.AbstractContainerMenu;
 import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.item.ItemStack;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 
 /**
  * 服务端业务入口：把客户端的意图翻译成对玩家磁盘的变更，然后回推权威状态。
  *
  * <p>这里是唯一可以改动物品库存的地方。客户端发来的参数一律重新校验（归属、数量、
  * 目标是否存在、槽位是否可放置），校验不过只回错误消息、不动数据。
+ *
+ * <p>磁盘不按玩家分片，而是按**设备里那张储存卡的 uuid** 分片：插了哪张卡，看到的就是
+ * 哪块盘。因此除了换槽（插卡、装卸模块）和状态查询，所有请求都要求设备里插着卡。
  */
 public final class DiskRequestDispatcher {
+
+    /** 插卡区的槽位标识。 */
+    private static final String SLOT_CARD = "card";
+    /** 功能模块区槽位标识的前缀，后面直接跟槽位号。 */
+    private static final String SLOT_MODULE = "module";
 
     private DiskRequestDispatcher() {
     }
@@ -38,26 +51,72 @@ public final class DiskRequestDispatcher {
         MinecraftServer server = player.getServer();
         PlayerDiskStore store = PlayerDiskStore.get(server);
         if (store == null) {
-            reply(player, null, OpResult.fail("informationera.msg.no_disk"));
+            reply(player, null, null, OpResult.fail("informationera.msg.no_disk"));
             return;
         }
-        PlayerDisk disk = store.diskOf(player.getUUID(), player.getGameProfile().getName());
+        DeviceSlots device = store.deviceOf(player.getUUID());
         OpResult result;
         try {
-            result = dispatch(packet, player, disk);
+            result = dispatch(packet, player, store, device);
         } catch (RuntimeException e) {
             // 单个坏请求不应该让界面彻底失去响应。
             result = OpResult.fail("informationera.msg.internal_error", e.getClass().getSimpleName());
         }
-        if (result.isOk()) {
+        PlayerDisk disk = null;
+        // STATUS 只回设备插槽：切界面就会发一次，不该每次都把整棵树推一遍。
+        if (result.isOk() && packet.kind() != RequestType.STATUS && !device.card().isEmpty()) {
+            disk = resolveDisk(player, store, device);
             disk.purgeExpiredRecycleEntries(System.currentTimeMillis());
+        }
+        if (result.isOk()) {
             store.markPlayerDirty(player.getUUID());
         }
-        reply(player, disk, result);
+        reply(player, disk, store, result);
     }
 
-    private static OpResult dispatch(DiskRequestPacket packet, ServerPlayer player, PlayerDisk disk) {
+    /**
+     * 从设备里的卡解析出磁盘。
+     *
+     * <p>卡还没绑 uuid 就现分一个；玩家名下的旧盘（老存档里按玩家分片的那种）顺手挪到这张卡上，
+     * 这样老玩家插第一张卡时看到的是自己原来的盘，而不是一个空盘。
+     */
+    private static PlayerDisk resolveDisk(ServerPlayer player, PlayerDiskStore store, DeviceSlots device) {
+        UUID cardId = StorageCardItem.ensureDiskId(device.card());
+        store.adoptLegacyDisk(player.getUUID(), cardId);
+        return store.diskOfCard(cardId, StorageCardItem.defaultDiskName(cardId));
+    }
+
+    /** 哪些请求属于「物品 ↔ 信息」的转换，需要量子坍缩反应炉。 */
+    private static boolean isConversion(int kind) {
+        return kind == RequestType.DEPOSIT
+                || kind == RequestType.WITHDRAW
+                || kind == RequestType.WITHDRAW_TO_INVENTORY;
+    }
+
+    private static OpResult dispatch(DiskRequestPacket packet, ServerPlayer player,
+                                     PlayerDiskStore store, DeviceSlots device) {
         List<String> args = packet.args() == null ? List.of() : packet.args();
+        // 「玩家名」是客户端视图造的虚拟目录，服务端不认识它：以它为目标的操作一律落到根目录。
+        if (!args.isEmpty() && cc.sighs.informationera.disk.DiskFolder.HOST_ID.equals(args.get(0))) {
+            List<String> normalized = new ArrayList<>(args);
+            normalized.set(0, cc.sighs.informationera.disk.DiskFolder.ROOT_ID);
+            args = normalized;
+        }
+        // 换槽与状态查询是仅有的两个「没插卡也要能用」的请求——不然第一张卡永远插不进去。
+        if (packet.kind() == RequestType.SWAP_SLOT) {
+            return swapSlot(player, store, device, args);
+        }
+        if (packet.kind() == RequestType.STATUS) {
+            return OpResult.ok("informationera.msg.opened");
+        }
+        if (device.card().isEmpty()) {
+            return OpResult.fail("informationera.msg.no_card");
+        }
+        // 虚实转换要先有反应炉：没有它，磁盘只能浏览，物品坍缩不进去也还原不出来。
+        if (isConversion(packet.kind()) && !DiskAccess.canConvert(player)) {
+            return OpResult.fail("informationera.msg.no_reactor");
+        }
+        PlayerDisk disk = resolveDisk(player, store, device);
         switch (packet.kind()) {
             case RequestType.OPEN:
                 return OpResult.ok("informationera.msg.opened");
@@ -65,6 +124,8 @@ public final class DiskRequestDispatcher {
                 return disk.createFolder(arg(args, 0, disk.defaultDropFolderId()), arg(args, 1, "New folder"));
             case RequestType.RENAME:
                 return disk.rename(arg(args, 0, ""), arg(args, 1, ""));
+            case RequestType.RENAME_DISK:
+                return disk.renameDisk(arg(args, 0, ""));
             case RequestType.MOVE:
                 return disk.transfer(tail(args), arg(args, 0, ""), false);
             case RequestType.COPY:
@@ -78,7 +139,7 @@ public final class DiskRequestDispatcher {
             case RequestType.EMPTY_RECYCLE:
                 return disk.emptyRecycleBin();
             case RequestType.DEPOSIT:
-                return deposit(player, disk, args);
+                return deposit(player, disk, device, args);
             case RequestType.WITHDRAW:
                 return withdraw(player, disk, args);
             case RequestType.WITHDRAW_TO_INVENTORY:
@@ -86,6 +147,57 @@ public final class DiskRequestDispatcher {
             default:
                 return OpResult.fail("informationera.msg.unknown_request", String.valueOf(packet.kind()));
         }
+    }
+
+    // ---------------------------------------------------------------- 换槽
+
+    /**
+     * 换槽：把设备某个插槽与玩家物品栏的一个槽位整体互换。
+     *
+     * <p>参数：{@code slotId}（{@code card} 或 {@code module0} / {@code module1}）、{@code inventoryIndex}。
+     * 索引用的是玩家物品栏自己的容器下标（0–35 是快捷栏与主物品栏），不是当前容器菜单的槽位
+     * 下标——开始菜单是独立 Overlay，拿不到菜单下标，只能按物品栏编号来。
+     */
+    private static OpResult swapSlot(ServerPlayer player, PlayerDiskStore store,
+                                     DeviceSlots device, List<String> args) {
+        String slotId = arg(args, 0, "");
+        boolean cardSlot = SLOT_CARD.equals(slotId);
+        int moduleIndex = cardSlot ? -1 : moduleIndexOf(slotId);
+        if (!cardSlot && moduleIndex < 0) {
+            return OpResult.fail("informationera.msg.slot_rejected");
+        }
+        int inventoryIndex = parseInt(arg(args, 1, "-1"), -1);
+        Inventory inventory = player.getInventory();
+        if (inventoryIndex < 0 || inventoryIndex >= inventory.getContainerSize()) {
+            return OpResult.fail("informationera.msg.slot_rejected");
+        }
+        ItemStack incoming = inventory.getItem(inventoryIndex);
+        // 插卡区只收储存卡；模块区先不限制，留给你以后放任何东西。
+        if (cardSlot && !incoming.isEmpty() && !(incoming.getItem() instanceof StorageCardItem)) {
+            return OpResult.fail("informationera.msg.not_a_card");
+        }
+        ItemStack current = cardSlot ? device.card() : device.module(moduleIndex);
+        if (cardSlot) {
+            device.setCard(incoming);
+        } else {
+            device.setModule(moduleIndex, incoming);
+        }
+        inventory.setItem(inventoryIndex, current);
+        inventory.setChanged();
+        AbstractContainerMenu menu = player.containerMenu;
+        if (menu != null) {
+            menu.broadcastChanges();
+        }
+        store.markPlayerDirty(player.getUUID());
+        return OpResult.ok("informationera.msg.slot_swapped");
+    }
+
+    private static int moduleIndexOf(String slotId) {
+        if (slotId == null || !slotId.startsWith(SLOT_MODULE)) {
+            return -1;
+        }
+        int index = parseInt(slotId.substring(SLOT_MODULE.length()), -1);
+        return index >= 0 && index < DeviceSlots.MODULE_SLOTS ? index : -1;
     }
 
     // ---------------------------------------------------------------- 入库
@@ -96,7 +208,7 @@ public final class DiskRequestDispatcher {
      * <p>客户端只报「哪些槽位」，数量与物品内容一律由服务端从玩家背包重新读取，
      * 因此伪造数量没有意义。
      */
-    private static OpResult deposit(ServerPlayer player, PlayerDisk disk, List<String> args) {
+    private static OpResult deposit(ServerPlayer player, PlayerDisk disk, DeviceSlots device, List<String> args) {
         String folderId = arg(args, 0, disk.defaultDropFolderId());
         if (folderId == null || !disk.exists(folderId)) {
             folderId = disk.defaultDropFolderId();
@@ -130,6 +242,19 @@ public final class DiskRequestDispatcher {
         }
         if (deposits.isEmpty()) {
             return OpResult.fail("informationera.msg.nothing_to_deposit");
+        }
+
+        // 容量校验：储存空间由储存卡提供。整批超出就整批拒绝，不做部分入库——否则客户端
+        // 会以为「都存进去了」，而服务端只收了一部分，两边对不上。
+        // 设备里插着的那张卡也算额度：卡插进去就不在物品栏里了。
+        long incoming = 0L;
+        for (DiskService.Deposit entry : deposits) {
+            incoming += entry.amount();
+        }
+        long used = disk.totalQuantity();
+        long capacity = DiskAccess.capacity(player, device.card().getCount());
+        if (used + incoming > capacity) {
+            return OpResult.fail("informationera.msg.disk_full", used + " / " + capacity);
         }
 
         // 第二步：先全部入账。只有这一步完全成功，才去扣槽位——
@@ -280,9 +405,11 @@ public final class DiskRequestDispatcher {
 
     // ---------------------------------------------------------------- 工具
 
-    private static void reply(ServerPlayer player, PlayerDisk disk, OpResult result) {
+    private static void reply(ServerPlayer player, PlayerDisk disk, PlayerDiskStore store, OpResult result) {
         String payload = disk == null ? "" : DiskCodec.encode(disk);
-        NetworkManager.sendToPlayer(DiskStatePacket.of(payload, result.isOk(),
+        // 设备插槽每次一并回推：客户端靠它渲染开始菜单、并决定资源管理器按钮是否出现。
+        String device = store == null ? "" : store.deviceOf(player.getUUID()).encode(player.registryAccess());
+        NetworkManager.sendToPlayer(DiskStatePacket.of(payload, device, result.isOk(),
                 result.messageKey(), result.arg()), player);
     }
 

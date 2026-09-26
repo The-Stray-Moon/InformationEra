@@ -114,12 +114,13 @@ public final class FileExplorerController {
     private double restoreW;
     private double restoreH;
 
-    private String currentKey = DiskFolder.ROOT_ID;
+    private String currentKey = DiskFolder.HOST_ID;
     private final Set<VirtualFileSystem.Entry> selected = new HashSet<>();
     private final Set<VirtualFileSystem.Entry> checkedSet = new HashSet<>();
     private int lastCheckedIndex = -1;
     private final List<VirtualFileSystem.Entry> renderedEntryList = new ArrayList<>();
-    private final Set<String> expandedSidebar = new HashSet<>();
+    // 最上层那个「玩家名」目录默认展开，一进来就能看到里面的磁盘。
+    private final Set<String> expandedSidebar = new HashSet<>(Set.of(DiskFolder.HOST_ID));
     // 「固定到快速访问」的状态存在客户端配置里（ExplorerPreferences），不放在窗口实例上——
     // 否则关掉窗口、重启客户端就全丢了。
     private final List<Double> columnWidths = new ArrayList<>(List.of(320.0, 160.0, 120.0, 100.0, 140.0, 100.0));
@@ -233,7 +234,7 @@ public final class FileExplorerController {
         return minimized;
     }
 
-    /** 供任务栏/最近路径跳转使用，直接导航到 key。 */
+    /** 供任务栏跳转列表等外部入口使用，直接导航到 key。 */
     void navigateToExternal(String key) {
         if (fs.folder(key) == null) {
             return;
@@ -925,11 +926,11 @@ public final class FileExplorerController {
         }
         List<String> candidates = new ArrayList<>();
         Set<String> seen = new HashSet<>();
-        // 最近导航历史 + 全局最近路径。
+        // 本窗口的导航历史 + 快速访问里的路径（固定项在前，其余按使用频率）。
         for (String key : navHistory) {
             addAddressCandidate(candidates, seen, key, query);
         }
-        for (String key : FileExplorerWindow.getRecentPaths()) {
+        for (String key : ExplorerPreferences.quickAccess()) {
             addAddressCandidate(candidates, seen, key, query);
         }
         // VFS 全部文件夹 key/name 前缀匹配。
@@ -1103,19 +1104,23 @@ public final class FileExplorerController {
             return null;
         }
 
-        // 现在只有一块磁盘：第一个名字要么是盘名/盘根别名，要么是根下的一个文件夹。
+        // 现在只有一块磁盘：第一个名字要么是玩家名（最上层）、盘名（磁盘那一层），
+        // 要么是磁盘里的一个文件夹。
         String key;
         String first = names.get(0);
-        // 根目录的显示名就是玩家名字，所以任何以玩家名开头的路径都指向盘根。
-        // 另外保留几个通用别名，方便玩家直接敲。
+        // 最上层是玩家名目录，磁盘挂在它下面；「此电脑」这类通用别名也指向这一层。
+        VirtualFileSystem.Folder host = fs.folder(DiskFolder.HOST_ID);
+        String hostName = host == null ? "" : host.name;
         String rootName = fs.diskName();
-        if ((rootName != null && !rootName.isEmpty() && first.equalsIgnoreCase(rootName))
+        if ((!hostName.isEmpty() && first.equalsIgnoreCase(hostName))
                 || first.equalsIgnoreCase("信息磁盘")
                 || first.equalsIgnoreCase("此电脑")
                 || first.equalsIgnoreCase("我的电脑")
                 || first.equalsIgnoreCase("disk")
                 || first.equalsIgnoreCase("root")
                 || first.equals("/")) {
+            key = DiskFolder.HOST_ID;
+        } else if (rootName != null && !rootName.isEmpty() && first.equalsIgnoreCase(rootName)) {
             key = DiskFolder.ROOT_ID;
         } else if (first.equalsIgnoreCase("回收站") || first.equalsIgnoreCase("recyclebin")) {
             key = DiskFolder.RECYCLE_ID;
@@ -3319,11 +3324,11 @@ public final class FileExplorerController {
         if (navHistory.size() > 20) {
             navHistory.remove(navHistory.size() - 1);
         }
-        // 记录全局最近路径（任务栏 Jump List 用）。
-        FileExplorerWindow.recordRecentPath(currentKey);
+        // 记一笔访问：快速访问的「常用文件夹」按使用次数和最后访问时间排序。
+        ExplorerPreferences.record(currentKey);
         updateSearchPlaceholder();
         renderContent();
-        // 导航树必须整体重绘：侧边栏的「最近使用」刚刚多了这一条，
+        // 导航树必须整体重绘：侧边栏的「常用文件夹」刚刚多了这一条，
         // 只更新选中态不会把新条目画出来。
         renderNavigation();
         // 重绘后节点是新的，选中态要再刷一次。
@@ -3380,51 +3385,40 @@ public final class FileExplorerController {
             return;
         }
         StringBuilder sb = new StringBuilder();
-        // 导航树分成三段：快速访问（固定 + 最近使用）、主目录树、回收站。
+        // 导航树分成三段：快速访问（固定项 + 常用文件夹）、主目录树、回收站。
         // 段与段之间插分割线，避免不同用途的路径挤在一起。
         boolean sectionWritten = false;
 
-        // 第一段：快速访问。固定项与「最近使用」之间也要有分割线，它们是两组不同的东西。
+        // 第一段：快速访问。固定项与「常用文件夹」是两组不同的东西，中间要有分割线。
+        // 「常用文件夹」按 Windows 跳转列表的机制排：使用次数按闲置时间衰减后降序；
+        // 条数上限已经在 ExplorerPreferences 里裁好，这里不再自己截断。
         List<String> pinnedKeys = ExplorerPreferences.pinned();
-        List<String> recent = FileExplorerWindow.getRecentPaths();
-        List<String> recentShown = new ArrayList<>();
-        if (!recent.isEmpty()) {
-            int shown = 0;
-            for (String key : recent) {
-                if (pinnedKeys.contains(key)) {
-                    continue;
-                }
-                recentShown.add(key);
-                if (++shown >= 8) {
-                    break;
-                }
-            }
-        }
-        if (!pinnedKeys.isEmpty() || !recentShown.isEmpty()) {
+        List<String> frequentKeys = ExplorerPreferences.frequent();
+        if (!pinnedKeys.isEmpty() || !frequentKeys.isEmpty()) {
             sb.append("<div class=\"fe-nav-title\">").append(t("informationera.fe.quick_access")).append("</div>");
             for (String key : pinnedKeys) {
                 renderPinnedNode(sb, key);
             }
-            if (!recentShown.isEmpty()) {
+            if (!frequentKeys.isEmpty()) {
                 sb.append("<div class=\"fe-nav-sep\"></div>");
                 sb.append("<div class=\"fe-nav-title\">")
-                  .append(t("informationera.fe.recent_use")).append("</div>");
-                for (String key : recentShown) {
+                  .append(t("informationera.fe.frequent")).append("</div>");
+                for (String key : frequentKeys) {
                     renderPinnedNode(sb, key);
                 }
             }
             sectionWritten = true;
         }
 
-        // 第二段：主目录。这里只放**一个**盘根入口（以玩家名命名），
-        // 需要看里面的分类时点它的展开箭头——不要把子文件夹一股脑列出来。
-        VirtualFileSystem.Folder root = fs.folder(DiskFolder.ROOT_ID);
-        if (root != null) {
+        // 第二段：主目录。最上层是玩家名，玩家名下面是磁盘，磁盘里面才是磁盘内容——
+        // 逐层点展开箭头，不要把子文件夹一股脑列出来。
+        VirtualFileSystem.Folder host = fs.folder(DiskFolder.HOST_ID);
+        if (host != null) {
             if (sectionWritten) {
                 sb.append("<div class=\"fe-nav-sep\"></div>");
             }
             sb.append("<div class=\"fe-nav-title\">").append(t("informationera.fe.main_directory")).append("</div>");
-            renderSidebarNode(sb, DiskFolder.ROOT_ID, 0);
+            renderSidebarNode(sb, DiskFolder.HOST_ID, 0);
             sectionWritten = true;
         }
 
@@ -3465,16 +3459,23 @@ public final class FileExplorerController {
         }
         sb.append("<div class=\"fe-nav-item\" data-path=\"").append(escape(key)).append("\">");
         sb.append("<span class=\"fe-chevron fe-chevron-empty\"></span>");
-        sb.append(folderIcon(16));
+        // 固定项也可能就是磁盘本身，同样用储存卡图标。
+        sb.append(DiskFolder.ROOT_ID.equals(key) ? diskIcon(16) : folderIcon(16));
         sb.append("<span class=\"fe-nav-label\">").append(escape(folder.name)).append("</span>");
         sb.append("</div>");
     }
 
+    /** 导航树每一层的缩进量（px）。层级靠它表达，箭头只负责展开/收起。 */
+    private static final int NAV_INDENT = 14;
+    /** 导航项的基础左内边距，与 CSS 里 .fe-nav-item 的 padding 保持一致。 */
+    private static final int NAV_INDENT_BASE = 8;
+
     /**
      * 渲染一个导航项。
      *
-     * <p>刻意不做层级缩进：导航栏只有 240px 宽，缩进叠上长名称会撑出横向滚动条。
-     * 层级改由展开/收起（箭头）和图标表达。
+     * <p>层级用**缩进**表达（每层 {@link #NAV_INDENT} 像素）：玩家名下面是磁盘，磁盘下面是
+     * 分类文件夹，一眼能看出谁在谁里面。缩进只加在这一处，名称照旧走省略号，所以窄导航栏
+     * 不会因此冒出横向滚动条。
      */
     private void renderSidebarNode(StringBuilder sb, String key, int depth) {
         VirtualFileSystem.Folder folder = fs.folder(key);
@@ -3483,14 +3484,19 @@ public final class FileExplorerController {
         }
         boolean expandable = fs.hasChildFolders(key);
         boolean expanded = expandable && expandedSidebar.contains(key);
-        sb.append("<div class=\"fe-nav-item\" data-path=\"").append(escape(key)).append("\">");
+        sb.append("<div class=\"fe-nav-item\" data-path=\"").append(escape(key)).append("\"");
+        if (depth > 0) {
+            sb.append(" style=\"padding-left:").append(NAV_INDENT_BASE + NAV_INDENT * depth).append("px\"");
+        }
+        sb.append(">");
         if (expandable) {
             sb.append("<span class=\"fe-chevron\" data-toggle=\"").append(escape(key)).append("\">")
               .append(expanded ? chevronDown() : chevronRight()).append("</span>");
         } else {
             sb.append("<span class=\"fe-chevron fe-chevron-empty\"></span>");
         }
-        sb.append(folderIcon(16));
+        // 磁盘用储存卡那张贴图：它本来就是一张卡，画成文件夹认不出来。
+        sb.append(DiskFolder.ROOT_ID.equals(key) ? diskIcon(16) : folderIcon(16));
         sb.append("<span class=\"fe-nav-label\">").append(escape(folder.name)).append("</span>");
         sb.append("</div>");
 
@@ -5103,9 +5109,21 @@ public final class FileExplorerController {
      * <p>{@code interactive="0"} 关掉该元素自身的交互能力：资源管理器里整行的
      * 点击/拖拽由行容器统一处理，图标不应该独立参与命中。
      */
+    /**
+     * 磁盘的图标：直接用储存卡那张贴图。
+     *
+     * <p>用 AUI 的 {@code <texture>} 元素按资源路径取图，不需要像物品图标那样事后喂
+     * ItemStack，所以导航树、内容区、固定项都能直接内联。
+     */
+    private static String diskIcon(int size) {
+        return "<texture class=\"fe-disk-icon\" src=\"informationera:textures/item/storage_card.png\""
+                + " style=\"width:" + size + "px;height:" + size + "px\"></texture>";
+    }
+
     static String iconFor(VirtualFileSystem.Entry entry, int size) {
         if (entry.folder) {
-            return folderIcon(size);
+            // 磁盘（磁盘根）也是一张卡，不该画成文件夹。
+            return DiskFolder.ROOT_ID.equals(entry.childKey) ? diskIcon(size) : folderIcon(size);
         }
         return "<span class=\"fe-item-icon\" data-icon-for=\"" + escapeAttr(entry.id) + "\""
                 + " style=\"width:" + size + "px;height:" + size + "px\">"

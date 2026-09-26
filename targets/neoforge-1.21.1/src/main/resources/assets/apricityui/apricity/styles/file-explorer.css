@@ -583,7 +583,7 @@
     white-space: nowrap;
 }
 
-/* 导航树各段之间的分割线：快速访问 / 最近使用 / 主目录 / 回收站彼此隔开。 */
+/* 导航树各段之间的分割线：快速访问 / 常用文件夹 / 主目录 / 回收站彼此隔开。 */
 .fe-nav-sep {
     height: 1px;
     margin: 6px 8px;
@@ -645,6 +645,12 @@
 .fe-chevron-empty {
     flex: 0 0 18px;
     width: 18px;
+}
+
+/* 磁盘图标：直接用储存卡那张 16×16 贴图，放大时保持像素感、不要糊。 */
+.fe-disk-icon {
+    flex: 0 0 auto;
+    image-rendering: pixelated;
 }
 
 /* ---------- 列表视图 ---------- */
@@ -1664,7 +1670,7 @@
     border-color: var(--ore-green);
 }
 
-/* ---------- 左上角打开按钮（独立 Overlay） ---------- */
+/* ---------- 左下角任务栏（独立 Overlay）：开始菜单 + 资源管理器 ---------- */
 .fe-trigger-body {
     margin: 0;
     width: 100vw;
@@ -1675,18 +1681,129 @@
     transform: translateZ(1000px);
 }
 
-.fe-trigger-btn {
+.fe-taskbar-btn {
     position: fixed;
     bottom: 8px;
-    left: 8px;
     z-index: 40;
     pointer-events: auto;
     color: var(--ore-gold);
 }
 
-.fe-trigger-btn svg {
+.fe-start-btn {
+    left: 8px;
+}
+
+/* 资源管理器按钮紧挨在开始菜单右边，插了卡才显示。 */
+.fe-explorer-btn {
+    left: 48px;
+}
+
+.fe-taskbar-btn svg {
     width: 22px;
     height: 22px;
+}
+
+/* ---------- 开始菜单面板：插卡区 + 功能模块区 + 物品栏换槽视图 ---------- */
+.fe-start-panel {
+    position: fixed;
+    left: 8px;
+    bottom: 56px;
+    z-index: 70;
+    display: none;
+    width: 360px;
+    padding: 10px;
+    pointer-events: auto;
+    color: var(--ore-ink);
+    background: var(--ore-surface-deep);
+    border: 2px solid var(--ore-edge);
+    box-shadow: 4px 4px 0 rgba(0, 0, 0, 0.35);
+}
+
+.fe-start-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+.fe-start-title {
+    color: #ffffff;
+}
+
+.fe-start-disk {
+    flex: 1;
+    text-align: right;
+    font-size: var(--ore-font-sm);
+    color: var(--ore-ink-muted);
+}
+
+.fe-start-close {
+    width: 16px;
+    height: 16px;
+    text-align: center;
+    line-height: 16px;
+    color: var(--ore-ink-muted);
+    cursor: pointer;
+}
+
+.fe-start-close:hover {
+    color: #ffffff;
+    background: var(--ore-red);
+}
+
+.fe-start-label {
+    margin: 6px 0 4px;
+    font-size: var(--ore-font-sm);
+    color: var(--ore-ink-muted);
+}
+
+.fe-start-slots {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+
+/* 物品栏视图：固定 9 列，和原版物品栏的排布一致。 */
+.fe-start-inventory {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(32px, 32px));
+    gap: 4px;
+}
+
+.fe-start-slot {
+    position: relative;
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: auto;
+    background: var(--ore-surface);
+    border: 2px solid var(--ore-edge);
+    cursor: pointer;
+}
+
+.fe-start-slot:hover {
+    border-color: var(--ore-gold);
+}
+
+.fe-start-icon-box {
+    width: 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.fe-start-icon {
+    width: 24px;
+    height: 24px;
+}
+
+.fe-start-hint {
+    margin-top: 8px;
+    font-size: var(--ore-font-sm);
+    color: var(--ore-ink-muted);
 }
 
 .fe-taskbar-badge {

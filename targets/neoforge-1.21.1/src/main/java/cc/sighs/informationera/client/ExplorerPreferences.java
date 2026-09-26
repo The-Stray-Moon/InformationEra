@@ -1,6 +1,7 @@
 package cc.sighs.informationera.client;
 
 import cc.sighs.informationera.InformationEraNeoForge121;
+import cc.sighs.informationera.disk.DiskFolder;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
@@ -8,17 +9,28 @@ import net.neoforged.fml.event.config.ModConfigEvent;
 import net.neoforged.neoforge.common.ModConfigSpec;
 
 import java.util.ArrayList;
-import java.util.LinkedHashSet;
+import java.util.Iterator;
 import java.util.List;
-import java.util.Set;
+import java.util.function.Predicate;
 
 /**
  * 资源管理器的客户端偏好，落盘在 {@code config/informationera-client.toml}。
  *
- * <p>为什么放在客户端配置而不是服务端存档：这些是**玩家的界面习惯**（固定了哪些位置、
- * 最近访问过什么），换服务器也应该跟着走，而且不需要服务端知道。
+ * <p>导航栏「快速访问」里的条目按 Windows 文件资源管理器的跳转列表（Jump List）机制建模：
+ * 一个文件夹在列表里只有**一条**记录，带固定状态、使用次数、最后访问时间——对应 Windows
+ * 那个 {@code automaticDestinations-ms} 文件里 DestList 的一条 entry（pin status / 访问计数 /
+ * 最后修改时间）。资源管理器每次打开一个文件夹，Shell 都会调 {@code SHAddToRecentDocs} 记一笔，
+ * 记的就是这份 usage。
  *
- * <p>导航栏的「快速访问」和「最近使用」如果只存内存，每次重启客户端都会清空——
+ * <p>界面上的「常用文件夹」段就是**未固定**的条目按使用权重降序取前 {@link #MAX_DESTINATIONS} 条，
+ * 固定项单独排在它前面。使用权重 = 使用次数按闲置时间指数衰减（半衰期见
+ * {@link #USE_HALF_LIFE_DAYS}）：久不去的目录权重被时间摊薄，最后被挤出列表，与 Windows
+ * 把老条目老化掉的行为一致。它看起来「既像最近访问、又像最常访问」正是这个原因——Windows
+ * 官方措辞也只是 "accessed most recently and most frequently"，具体加权公式没有公开，
+ * 这里是可解释的近似。
+ *
+ * <p>为什么放在客户端配置而不是服务端存档：这些是**玩家的界面习惯**（固定了哪些位置、常去
+ * 哪些目录），换服务器也应该跟着走，而且不需要服务端知道。只存内存的话每次重启都会清空——
  * 那正是玩家看到「固定过的都没了」的原因。
  */
 @EventBusSubscriber(modid = InformationEraNeoForge121.MOD_ID, value = Dist.CLIENT)
@@ -26,27 +38,69 @@ public final class ExplorerPreferences {
 
     private static final ModConfigSpec.Builder BUILDER = new ModConfigSpec.Builder();
 
-    /** 固定到「快速访问」的文件夹 id，按固定顺序保存。 */
-    private static final ModConfigSpec.ConfigValue<List<? extends String>> PINNED = BUILDER
-            .comment("Folders pinned to the Quick access section, by folder id.")
+    /** 跳转列表条目，每条编码成 {@code 固定标志|使用次数|最后访问毫秒|文件夹 key}。 */
+    private static final ModConfigSpec.ConfigValue<List<? extends String>> DESTINATIONS = BUILDER
+            .comment("Quick access destinations: <pinned>|<uses>|<lastAccessMillis>|<folderKey>.")
+            .defineListAllowEmpty("destinations", new ArrayList<String>(), () -> "", ExplorerPreferences::isValidEntry);
+
+    // 下面两个是旧格式（固定项、最近访问各一条纯 key 列表）。留着声明只为把老配置迁进
+    // destinations，迁移后会被清空，读的时候也只在 destinations 为空时才看它们。
+
+    private static final ModConfigSpec.ConfigValue<List<? extends String>> LEGACY_PINNED = BUILDER
+            .comment("Deprecated, migrated into 'destinations'.")
             .defineListAllowEmpty("pinned", new ArrayList<String>(), () -> "", ExplorerPreferences::isValidEntry);
 
-    /** 最近访问过的文件夹 id，最近的在前。 */
-    private static final ModConfigSpec.ConfigValue<List<? extends String>> RECENT = BUILDER
-            .comment("Recently visited folder ids, most recent first.")
+    private static final ModConfigSpec.ConfigValue<List<? extends String>> LEGACY_RECENT = BUILDER
+            .comment("Deprecated, migrated into 'destinations'.")
             .defineListAllowEmpty("recent", new ArrayList<String>(), () -> "", ExplorerPreferences::isValidEntry);
 
-    /** 最近访问记录的上限，与内存里的裁剪保持一致。 */
-    private static final int RECENT_LIMIT = 15;
+    /**
+     * 「常用文件夹」的条数上限。
+     *
+     * <p>固定四条：这一段的定位就是「最常用的那几个入口」，再多就退化成目录列表了。
+     * 超出上限的条目从末尾丢弃——Windows 截断跳转列表也是「从下往上」。
+     *
+     * <p>只裁未固定的条目：固定项是玩家明确要留下的，不该被频繁项挤掉。
+     */
+    private static final int MAX_DESTINATIONS = 4;
+
+    /**
+     * 使用次数的半衰期（天）：闲置越久，历史使用次数在排序里的权重越低。
+     *
+     * <p>Windows 同样会把老条目老化掉，但衰减公式没有公开，这里取最直观的指数半衰期——一个
+     * 目录闲置一个月，它的使用次数在排序里就只剩一半权重，闲置越久越容易被挤出列表。衰减只
+     * 作用在排序和裁剪上，不会改写记录下来的次数本身。
+     */
+    private static final double USE_HALF_LIFE_DAYS = 30.0;
+
+    /** 一天的毫秒数，衰减换算用。 */
+    private static final double MILLIS_PER_DAY = 86_400_000.0;
+
+    /** 条目内部字段的分隔符。 */
+    private static final char FIELD_SEP = '|';
 
     public static final ModConfigSpec SPEC = BUILDER.build();
 
-    /** 内存镜像：界面读它，改完写回配置。 */
-    private static final Set<String> pinned = new LinkedHashSet<>();
-    private static final List<String> recent = new ArrayList<>();
+    /** 内存镜像：界面读它，改完写回配置。顺序即展示顺序，固定项在前。 */
+    private static final List<Destination> destinations = new ArrayList<>();
     private static boolean loaded;
 
     private ExplorerPreferences() {
+    }
+
+    /** 一条跳转列表记录：一个文件夹 + 固定状态 + 使用次数 + 最后访问时间。 */
+    private static final class Destination {
+        private final String key;
+        private boolean pinned;
+        private int uses;
+        private long lastAccess;
+
+        private Destination(String key, boolean pinned, int uses, long lastAccess) {
+            this.key = key;
+            this.pinned = pinned;
+            this.uses = uses;
+            this.lastAccess = lastAccess;
+        }
     }
 
     /** 配置加载/重载后同步到内存镜像。 */
@@ -71,24 +125,43 @@ public final class ExplorerPreferences {
      * 如果边读边清，会在失败时把内存里的既有数据抹掉。
      */
     private static void syncFromConfig() {
-        List<String> pinnedLoaded = new ArrayList<>();
-        for (String value : PINNED.get()) {
-            if (isValidEntry(value) && !pinnedLoaded.contains(value)) {
-                pinnedLoaded.add(value);
+        List<Destination> loadedDestinations = new ArrayList<>();
+        for (String raw : DESTINATIONS.get()) {
+            Destination destination = decode(raw);
+            if (destination != null && indexOf(loadedDestinations, destination.key) < 0) {
+                loadedDestinations.add(destination);
             }
         }
-        List<String> recentLoaded = new ArrayList<>();
-        for (String value : RECENT.get()) {
-            if (isValidEntry(value) && !recentLoaded.contains(value)) {
-                recentLoaded.add(value);
+        // 旧配置迁移。只在 destinations 还是空的时候做，免得把玩家已经攒下的记录覆盖掉。
+        boolean migrate = loadedDestinations.isEmpty();
+        if (migrate) {
+            long now = System.currentTimeMillis();
+            for (String key : LEGACY_PINNED.get()) {
+                if (isValidEntry(key) && indexOf(loadedDestinations, key) < 0) {
+                    loadedDestinations.add(new Destination(key, true, 0, 0L));
+                }
             }
+            List<? extends String> legacyRecent = LEGACY_RECENT.get();
+            for (int i = 0; i < legacyRecent.size(); i++) {
+                String key = legacyRecent.get(i);
+                if (isValidEntry(key) && indexOf(loadedDestinations, key) < 0) {
+                    // 旧 recent 是「最近的在前」：越靠前说明时间越新，用递减的时间戳还原先后。
+                    loadedDestinations.add(new Destination(key, false, 1, now - i));
+                }
+            }
+            migrate = !loadedDestinations.isEmpty();
         }
         // 两次读取都成功，才覆盖内存镜像。
-        pinned.clear();
-        pinned.addAll(pinnedLoaded);
-        recent.clear();
-        recent.addAll(recentLoaded);
+        destinations.clear();
+        destinations.addAll(loadedDestinations);
+        rank();
         loaded = true;
+        if (migrate) {
+            // 迁移完就把旧键清掉，之后只认 destinations。
+            LEGACY_PINNED.set(new ArrayList<String>());
+            LEGACY_RECENT.set(new ArrayList<String>());
+            persist();
+        }
     }
 
     /**
@@ -113,82 +186,203 @@ public final class ExplorerPreferences {
         return value instanceof String s && !s.isBlank();
     }
 
-    // ---------------------------------------------------------------- 固定项
+    // ------------------------------------------------------------ 编解码与排序
 
+    /**
+     * 解析一条记录。key 放在最后一个字段、用 {@code split(…, 4)} 切，这样 key 里出现分隔符
+     * 也不会解析错。
+     */
+    private static Destination decode(String raw) {
+        String[] parts = raw.split("\\" + FIELD_SEP, 4);
+        if (parts.length < 4 || parts[3].isBlank()) {
+            return null;
+        }
+        return new Destination(parts[3], "1".equals(parts[0].trim()),
+                parseInt(parts[1]), parseLong(parts[2]));
+    }
+
+    private static String encode(Destination destination) {
+        return (destination.pinned ? "1" : "0") + FIELD_SEP + destination.uses
+                + FIELD_SEP + destination.lastAccess + FIELD_SEP + destination.key;
+    }
+
+    private static int parseInt(String raw) {
+        try {
+            return Math.max(0, Integer.parseInt(raw.trim()));
+        } catch (NumberFormatException malformed) {
+            return 0;
+        }
+    }
+
+    private static long parseLong(String raw) {
+        try {
+            return Math.max(0L, Long.parseLong(raw.trim()));
+        } catch (NumberFormatException malformed) {
+            return 0L;
+        }
+    }
+
+    /**
+     * 一个条目当前的使用权重：历史使用次数按闲置时间指数衰减。
+     *
+     * <p>从没访问过就被固定的条目（次数与时间都是 0）权重为 0，取消固定后自然排在末尾。
+     */
+    private static double weight(Destination destination, long now) {
+        double idleMillis = Math.max(0L, now - destination.lastAccess);
+        return destination.uses * Math.pow(0.5, idleMillis / (USE_HALF_LIFE_DAYS * MILLIS_PER_DAY));
+    }
+
+    /**
+     * 重排并裁剪：固定项在前（保持固定时的先后顺序），其余按 {@link #weight} 降序。
+     *
+     * <p>{@code List.sort} 是稳定排序，所以固定项之间的相对顺序不会被搅乱。
+     */
+    private static void rank() {
+        long now = System.currentTimeMillis();
+        destinations.sort((left, right) -> {
+            if (left.pinned != right.pinned) {
+                return left.pinned ? -1 : 1;
+            }
+            if (left.pinned) {
+                return 0;
+            }
+            int byWeight = Double.compare(weight(right, now), weight(left, now));
+            return byWeight != 0 ? byWeight : Long.compare(right.lastAccess, left.lastAccess);
+        });
+        int shown = 0;
+        Iterator<Destination> iterator = destinations.iterator();
+        while (iterator.hasNext()) {
+            Destination destination = iterator.next();
+            if (destination.pinned) {
+                continue;
+            }
+            if (++shown > MAX_DESTINATIONS) {
+                iterator.remove();
+            }
+        }
+    }
+
+    private static void persist() {
+        List<String> raw = new ArrayList<>(destinations.size());
+        for (Destination destination : destinations) {
+            raw.add(encode(destination));
+        }
+        DESTINATIONS.set(raw);
+        SPEC.save();
+    }
+
+    private static int indexOf(List<Destination> list, String key) {
+        if (key == null) {
+            return -1;
+        }
+        for (int i = 0; i < list.size(); i++) {
+            if (list.get(i).key.equals(key)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    // ---------------------------------------------------------------- 对外接口
+
+    /** 固定项，按固定的先后顺序。 */
     public static List<String> pinned() {
         ensureLoaded();
-        return new ArrayList<>(pinned);
+        List<String> keys = new ArrayList<>();
+        for (Destination destination : destinations) {
+            if (destination.pinned) {
+                keys.add(destination.key);
+            }
+        }
+        return keys;
+    }
+
+    /** 常用项：未固定的条目，已按使用次数/最后访问排好并裁到上限。 */
+    public static List<String> frequent() {
+        ensureLoaded();
+        List<String> keys = new ArrayList<>();
+        for (Destination destination : destinations) {
+            if (!destination.pinned) {
+                keys.add(destination.key);
+            }
+        }
+        return keys;
+    }
+
+    /** 固定项 + 常用项，任务栏跳转列表和地址栏补全用。 */
+    public static List<String> quickAccess() {
+        ensureLoaded();
+        List<String> keys = new ArrayList<>(destinations.size());
+        for (Destination destination : destinations) {
+            keys.add(destination.key);
+        }
+        return keys;
     }
 
     public static boolean isPinned(String key) {
         ensureLoaded();
-        return key != null && pinned.contains(key);
+        int index = indexOf(destinations, key);
+        return index >= 0 && destinations.get(index).pinned;
     }
 
-    /** 切换固定状态；返回切换后是否处于固定状态。 */
+    /**
+     * 切换固定状态；返回切换后是否处于固定状态。
+     *
+     * <p>固定一个从没访问过的文件夹会新建一条记录：取消固定后它仍然留在「常用文件夹」里，
+     * 与 Windows 取消固定后条目退回跳转列表的行为一致。
+     */
     public static boolean togglePin(String key) {
         if (key == null || key.isBlank()) {
             return false;
         }
         ensureLoaded();
+        int index = indexOf(destinations, key);
         boolean nowPinned;
-        if (pinned.contains(key)) {
-            pinned.remove(key);
-            nowPinned = false;
-        } else {
-            pinned.add(key);
+        if (index < 0) {
+            destinations.add(new Destination(key, true, 0, 0L));
             nowPinned = true;
+        } else {
+            Destination destination = destinations.get(index);
+            destination.pinned = !destination.pinned;
+            nowPinned = destination.pinned;
         }
-        persistPinned();
+        rank();
+        persist();
         return nowPinned;
     }
 
-    private static void persistPinned() {
-        PINNED.set(new ArrayList<>(pinned));
-        SPEC.save();
-    }
-
-    // ---------------------------------------------------------------- 最近访问
-
-    public static List<String> recent() {
-        ensureLoaded();
-        return new ArrayList<>(recent);
-    }
-
     /**
-     * 记录一次访问：去重、最近的在前、超出上限裁剪。
+     * 记录一次访问：已有记录就累加使用次数并刷新时间，否则新建一条。
      *
-     * <p>写盘做了节流——导航很频繁，每次都写文件没有必要。
+     * <p>使用次数和最后访问时间就是 Windows 那边「最近 + 最常」两个维度的来源。
      */
-    public static void recordRecent(String key) {
-        if (key == null || key.isBlank()) {
+    public static void record(String key) {
+        if (key == null || key.isBlank() || DiskFolder.HOST_ID.equals(key)) {
+            // 最上层的「玩家名」是视图造的虚拟目录，没必要占用常用列表的位置。
             return;
         }
         ensureLoaded();
-        boolean changed = recent.remove(key);
-        recent.add(0, key);
-        while (recent.size() > RECENT_LIMIT) {
-            recent.remove(recent.size() - 1);
-            changed = true;
+        long now = System.currentTimeMillis();
+        int index = indexOf(destinations, key);
+        if (index < 0) {
+            destinations.add(new Destination(key, false, 1, now));
+        } else {
+            Destination destination = destinations.get(index);
+            if (destination.uses < Integer.MAX_VALUE) {
+                destination.uses++;
+            }
+            destination.lastAccess = now;
         }
-        if (changed || recent.indexOf(key) != 0) {
-            persistRecent();
-        }
-    }
-
-    private static void persistRecent() {
-        RECENT.set(new ArrayList<>(recent));
-        SPEC.save();
+        rank();
+        persist();
     }
 
     /** 丢弃已不存在的路径（例如磁盘被重置过）。 */
-    public static void pruneUnknown(java.util.function.Predicate<String> exists) {
+    public static void pruneUnknown(Predicate<String> exists) {
         ensureLoaded();
-        boolean changed = pinned.removeIf(key -> !exists.test(key));
-        changed |= recent.removeIf(key -> !exists.test(key));
+        boolean changed = destinations.removeIf(destination -> !exists.test(destination.key));
         if (changed) {
-            persistPinned();
-            persistRecent();
+            persist();
         }
     }
 }

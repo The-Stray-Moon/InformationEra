@@ -115,14 +115,40 @@ public final class VirtualFileSystem {
     /** 空盘：服务端状态尚未到达时的初始视图。 */
     public static VirtualFileSystem create() {
         VirtualFileSystem fs = new VirtualFileSystem();
-        fs.folders.put(DiskFolder.ROOT_ID, new Folder(DiskFolder.ROOT_ID, "", null));
+        String diskLabel = FileExplorerText.t("informationera.fe.disk_unnamed");
+        fs.addHost();
+        fs.folders.put(DiskFolder.ROOT_ID, new Folder(DiskFolder.ROOT_ID, diskLabel, DiskFolder.HOST_ID));
         for (String id : DiskFolder.PRESET_IDS) {
             String key = DiskFolder.presetTranslationKey(id);
             fs.folders.put(id, new Folder(id, key == null ? id : FileExplorerText.t(key), DiskFolder.ROOT_ID));
         }
         fs.folders.put(DiskFolder.RECYCLE_ID,
                 new Folder(DiskFolder.RECYCLE_ID, FileExplorerText.t("informationera.fe.recycle_bin"), DiskFolder.ROOT_ID));
+        fs.attachRootToHost(diskLabel, DiskFolder.PRESET_IDS.length + 1);
         return fs;
+    }
+
+    /** 建一个「玩家名」虚拟目录：它不在磁盘数据里，只是把磁盘挂在更上一层。 */
+    private void addHost() {
+        folders.put(DiskFolder.HOST_ID, new Folder(DiskFolder.HOST_ID, hostName(), null));
+    }
+
+    /** 把磁盘根挂到玩家名目录下——界面上最上层是玩家名，进去才是磁盘。 */
+    private void attachRootToHost(String diskLabel, int childCount) {
+        Folder host = folders.get(DiskFolder.HOST_ID);
+        if (host == null) {
+            return;
+        }
+        host.entries.add(new Entry(DiskFolder.ROOT_ID, diskLabel, true, childCount, -1L, null, null,
+                FileExplorerText.t("informationera.fe.folder_type"), "", "", null,
+                DiskFolder.ROOT_ID, null, false));
+        parents.put(DiskFolder.ROOT_ID, DiskFolder.HOST_ID);
+    }
+
+    /** 最上层那个目录的名字就是玩家名。 */
+    private static String hostName() {
+        net.minecraft.client.Minecraft mc = net.minecraft.client.Minecraft.getInstance();
+        return mc.player == null ? "" : mc.player.getName().getString();
     }
 
     /** 从服务端镜像构建视图模型。 */
@@ -135,10 +161,11 @@ public final class VirtualFileSystem {
         if (cut != null) {
             fs.cutIds.addAll(cut);
         }
+        fs.addHost();
         DiskFolder root = disk.root();
         if (root != null) {
-            // 根节点在界面上用磁盘名（也就是玩家名字）呈现。
-            fs.folders.put(root.id(), new Folder(root.id(), root.name(), null));
+            // 磁盘自己也是一层：名字是磁盘名，父级是玩家名目录。
+            fs.folders.put(root.id(), new Folder(root.id(), root.name(), DiskFolder.HOST_ID));
         }
         for (DiskFolder folder : disk.allFolders()) {
             if (root != null && folder.id().equals(root.id())) {
@@ -166,6 +193,10 @@ public final class VirtualFileSystem {
             }
         }
         fs.recycleCount = disk.recycleCount();
+        if (root != null) {
+            // 最后把磁盘挂到玩家名目录下：界面上的层级就是「玩家名 → 磁盘 → 磁盘内容」。
+            fs.attachRootToHost(root.name(), disk.childrenOf(root.id()).size());
+        }
         return fs;
     }
 

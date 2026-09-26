@@ -10,6 +10,14 @@ public final class DiskFolder {
 
     /** 磁盘根节点的固定 id。根节点的显示名就是玩家名字。 */
     public static final String ROOT_ID = "r_root";
+
+    /**
+     * 视图层专用的「玩家名」目录 id。
+     *
+     * <p>它**不在磁盘数据里**：客户端把磁盘根挂在这个虚拟目录下，于是界面的层级是
+     * 「玩家名 → 磁盘 → 磁盘内容」。服务端不认识它，收到以它为目标的操作会回落到根目录。
+     */
+    public static final String HOST_ID = "ie_host";
     /** 回收站的固定 id。根节点下唯一一个不可重命名、不可移动的特殊文件夹。 */
     public static final String RECYCLE_ID = "recyclebin";
 

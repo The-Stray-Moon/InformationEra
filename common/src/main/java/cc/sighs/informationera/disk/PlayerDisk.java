@@ -35,7 +35,8 @@ public final class PlayerDisk {
         ALL
     }
 
-    private final String diskName;
+    /** 磁盘名；根目录的名字与它是同一个东西，改名时两处一起更新。 */
+    private String diskName;
     private final Map<String, DiskFolder> folders = new LinkedHashMap<>();
     /** 每个文件夹下按显示顺序排列的子节点 id（文件夹 id 与文件 id 混排）。 */
     private final Map<String, List<String>> children = new LinkedHashMap<>();
@@ -204,6 +205,22 @@ public final class PlayerDisk {
         return inventory.size();
     }
 
+    /**
+     * 库存里所有物品的总数量，用来和储存空间（储存卡提供的额度）做对比。
+     *
+     * <p>统计的是库存本身而不是文件：文件只是库存的别名，同一份库存可能被多个文件引用，
+     * 按文件累加会把数量重复算很多遍。
+     */
+    public long totalQuantity() {
+        long total = 0L;
+        for (Long value : inventory.values()) {
+            if (value != null && value > 0L) {
+                total += value;
+            }
+        }
+        return total;
+    }
+
     // ---------------------------------------------------------------- 文件夹操作
 
     /** 在 parentId 下新建文件夹。 */
@@ -232,7 +249,30 @@ public final class PlayerDisk {
     }
 
     /** 重命名文件或文件夹。回收站本身不可重命名。 */
+    /**
+     * 改磁盘名。
+     *
+     * <p>根目录的名字和磁盘名本来就是同一个东西，所以这里一次改掉两处——只改文件夹的话，
+     * 重新编码/解码之后名字又会从 diskName 字段还原回去。
+     */
+    public OpResult renameDisk(String newName) {
+        String clean = sanitizeName(newName);
+        if (clean.isEmpty()) {
+            return OpResult.fail("informationera.msg.name_empty");
+        }
+        DiskFolder root = folders.get(DiskFolder.ROOT_ID);
+        if (root != null) {
+            root.rename(clean);
+        }
+        this.diskName = clean;
+        return OpResult.ok("informationera.msg.renamed", clean);
+    }
+
     public OpResult rename(String nodeId, String newName) {
+        // 根目录就是磁盘本身，改名走磁盘那一套。
+        if (DiskFolder.ROOT_ID.equals(nodeId)) {
+            return renameDisk(newName);
+        }
         if (DiskFolder.RECYCLE_ID.equals(nodeId)) {
             return OpResult.fail("informationera.msg.protected_node");
         }
