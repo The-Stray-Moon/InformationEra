@@ -27,6 +27,9 @@ public final class StartMenuController {
     /** 物品栏视图显示的槽位数：快捷栏 + 主物品栏，不含护甲与副手。 */
     private static final int INVENTORY_SLOTS = 36;
 
+    /** 格子里的物品图标尺寸。 */
+    private static final int ICON_SIZE = 24;
+
     private static final String SLOT_CARD = "card";
     private static final String SLOT_MODULE = "module";
 
@@ -98,7 +101,7 @@ public final class StartMenuController {
             sb.append("<div class=\"fe-start-inventory\">");
             for (int i = 0; i < INVENTORY_SLOTS; i++) {
                 sb.append("<div class=\"fe-start-slot\" data-inv=\"").append(i).append("\">")
-                  .append("<span class=\"fe-start-icon-box\"><item class=\"fe-start-icon\" interactive=\"0\"></item></span></div>");
+                  .append(iconHtml()).append("</div>");
             }
             sb.append("</div>");
             sb.append("<div class=\"fe-start-hint\">")
@@ -126,11 +129,24 @@ public final class StartMenuController {
         driveIcons();
     }
 
+    /**
+     * 格子里的物品图标。
+     *
+     * <p>{@code <item>} 只会按「16px × iconScale」画，iconScale 又只认祖先 {@code <slot>}，
+     * 所以这里必须套一层 display slot 才能把图标画大；槽本身只画物品，不要底图、不参与命中。
+     */
+    private static String iconHtml() {
+        return "<slot class=\"fe-start-icon\" render=\"item\" interactive=\"0\" pointer=\"0\""
+                + " size=\"" + ICON_SIZE + "\" iconScale=\"" + FileExplorerController.iconScaleFor(ICON_SIZE) + "\""
+                + " style=\"width:" + ICON_SIZE + "px;height:" + ICON_SIZE + "px\">"
+                + "<item interactive=\"0\"></item></slot>";
+    }
+
     private static String slotHtml(String slotId, ItemStack stack) {
         StringBuilder sb = new StringBuilder();
         sb.append("<div class=\"fe-start-slot\" data-slot=\"").append(slotId).append("\">");
         if (stack != null && !stack.isEmpty()) {
-            sb.append("<span class=\"fe-start-icon-box\"><item class=\"fe-start-icon\" interactive=\"0\"></item></span>");
+            sb.append(iconHtml());
         }
         sb.append("</div>");
         return sb.toString();
@@ -186,22 +202,26 @@ public final class StartMenuController {
         render();
     }
 
-    /** 把真实物品栈喂给每个格子的 {@code <item>} 元素；这一步必须在 DOM 建好之后做。 */
+    /** 把真实物品栈喂给每个格子里的 {@code <item>} 元素；这一步必须在 DOM 建好之后做。 */
     private static void driveIcons() {
         Document document = document();
         if (document == null) {
             return;
         }
-        List<Element> slots = document.querySelectorAll(".fe-start-slot");
-        if (slots == null) {
+        List<Element> cells = document.querySelectorAll(".fe-start-slot");
+        if (cells == null) {
             return;
         }
-        for (Element slot : slots) {
-            Element icon = slot.querySelector(".fe-start-icon");
-            if (!(icon instanceof Item item)) {
+        for (Element cell : cells) {
+            Element iconSlot = cell.querySelector(".fe-start-icon");
+            if (iconSlot == null) {
                 continue;
             }
-            ItemStack stack = stackFor(slot);
+            Element child = iconSlot.querySelector("item");
+            if (!(child instanceof Item item)) {
+                continue;
+            }
+            ItemStack stack = stackFor(cell);
             if (stack.isEmpty()) {
                 continue;
             }
@@ -209,15 +229,15 @@ public final class StartMenuController {
         }
     }
 
-    private static ItemStack stackFor(Element slot) {
-        String inventoryIndex = slot.getAttribute("data-inv");
+    private static ItemStack stackFor(Element cell) {
+        String inventoryIndex = cell.getAttribute("data-inv");
         if (inventoryIndex != null) {
             Inventory inventory = playerInventory();
             int index = parseInt(inventoryIndex, -1);
             return inventory == null || index < 0 ? ItemStack.EMPTY : inventory.getItem(index);
         }
         DeviceSlots device = DiskStateHandler.device();
-        String slotId = slot.getAttribute("data-slot");
+        String slotId = cell.getAttribute("data-slot");
         if (SLOT_CARD.equals(slotId)) {
             return device.card();
         }

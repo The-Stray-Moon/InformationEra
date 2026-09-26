@@ -12,7 +12,11 @@ import com.sighs.apricityui.layout.Size;
 import cc.sighs.informationera.disk.DiskFolder;
 import net.minecraft.client.Minecraft;
 import net.minecraft.core.HolderLookup;
+import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.Style;
+import net.minecraft.network.chat.TextColor;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.TooltipFlag;
 
 import static cc.sighs.informationera.client.FileExplorerText.t;
 
@@ -135,6 +139,12 @@ public final class FileExplorerController {
     private boolean checkboxes = false;
     private boolean previewOpen = false;
     private int previewSize = 64;
+    /** 预览图标尺寸的上下限与每次缩放的步长（像素）。 */
+    private static final int PREVIEW_SIZE_MIN = 16;
+    private static final int PREVIEW_SIZE_MAX = 256;
+    private static final int PREVIEW_SIZE_STEP = 16;
+    /** 预览里 NBT 查看器是否展开。折叠状态存在这里而不是 DOM 上：换选中项会重建这一段。 */
+    private boolean nbtExpanded;
     private boolean compact = false;
     private boolean detailsPaneOpen = false;
     private String groupBy = null;
@@ -313,7 +323,6 @@ public final class FileExplorerController {
 
     /** 把 HTML 里静态命令栏文案替换为当前语言。 */
     private void localizeStaticLabels() {
-        setCmdLabel("fe-organize", t("informationera.fe.organize"));
         setCmdLabel("fe-new", t("informationera.fe.new"));
         setCmdLabel("fe-sort", t("informationera.fe.sort"));
         setCmdLabel("fe-layout", t("informationera.fe.layout"));
@@ -395,7 +404,6 @@ public final class FileExplorerController {
         bindToolButton("fe-view-details", () -> setViewMode("details"));
         bindToolButton("fe-view-thumb", () -> setViewMode("large"));
 
-        bindMenuButton("fe-organize", this::showOrganizeMenu);
         bindMenuButton("fe-new", this::showNewMenu);
         bindMenuButton("fe-sort", this::showSortMenu);
         bindMenuButton("fe-layout", this::showLayoutMenu);
@@ -406,7 +414,6 @@ public final class FileExplorerController {
         bindButtonHint("fe-back", t("informationera.fe.back"));
         bindButtonHint("fe-forward", t("informationera.fe.forward"));
         bindButtonHint("fe-up", t("informationera.fe.up"));
-        bindButtonHint("fe-organize", t("informationera.fe.organize"));
         bindButtonHint("fe-new", t("informationera.fe.new"));
         bindButtonHint("fe-cmd-cut", t("informationera.fe.cut"));
         bindButtonHint("fe-cmd-copy", t("informationera.fe.copy"));
@@ -1799,6 +1806,41 @@ public final class FileExplorerController {
         return sb.toString();
     }
 
+    /**
+     * 给拖拽虚影里的物品图标喂驱动栈。
+     *
+     * <p>虚影挂在任务栏 Overlay 的 Document 上，不是本窗口的 Document，所以内容区那套
+     * {@link #driveItemIcons()} 覆盖不到它——不补这一步，虚影里的物品就是个空图标。
+     * 虚影最多只显示一个物品图标，取第一个即可。
+     */
+    void driveGhostIcons() {
+        if (fs == null) {
+            return;
+        }
+        Element ghost = FileExplorerTrigger.getGlobalGhost();
+        if (ghost == null) {
+            return;
+        }
+        Element icon = ghost.querySelector(".fe-item-icon");
+        if (icon == null) {
+            return;
+        }
+        Element child = icon.querySelector("item");
+        if (!(child instanceof Item item)) {
+            return;
+        }
+        String nodeId = icon.getAttribute("data-icon-for");
+        VirtualFileSystem.Entry entry = nodeId == null ? null : entryById(nodeId);
+        if (entry == null || entry.itemKey == null) {
+            return;
+        }
+        ItemStack stack = fs.iconStackOf(entry, DiskClient.registryProvider());
+        if (stack.isEmpty()) {
+            return;
+        }
+        item.setDrivenState(stack, ItemStacks.overlayText(entry.count), false, false, Item.Source.INGREDIENT);
+    }
+
     /** 命中本窗口内需要覆盖系统光标的元素：ew/ns/nwse/pointer；无匹配返回 null。 */
     String resolveCursorKind(Position screenPos) {
         if (document == null || !document.isActive()) {
@@ -2203,64 +2245,6 @@ public final class FileExplorerController {
         entries.add(CtxEntry.header(t("informationera.fe.new")));
         entries.add(CtxEntry.action(t("informationera.fe.new_folder"), this::createFolder));
         openContextMenu(x, y, entries);
-    }
-
-    /** 命令栏「组织」下拉：剪切/复制/粘贴/复制到/移动到/全选/取消选择/属性。 */
-    private void showOrganizeMenu(double x, double y) {
-        List<CtxEntry> entries = new ArrayList<>();
-        entries.add(CtxEntry.action(t("informationera.fe.cut"), this::cut));
-        entries.add(CtxEntry.action(t("informationera.fe.copy"), this::copy));
-        entries.add(CtxEntry.action(t("informationera.fe.paste"), this::paste));
-        entries.add(CtxEntry.separator());
-        entries.add(CtxEntry.submenu(t("informationera.fe.copy_to"), organizeFolderChoices(true)));
-        entries.add(CtxEntry.submenu(t("informationera.fe.move_to"), organizeFolderChoices(false)));
-        entries.add(CtxEntry.separator());
-        entries.add(CtxEntry.action(t("informationera.fe.select_all"), this::selectAll));
-        entries.add(CtxEntry.action(t("informationera.fe.cancel_selection"), this::cancelSelection));
-        entries.add(CtxEntry.separator());
-        entries.add(CtxEntry.action(t("informationera.fe.properties"), this::showProperties));
-        openContextMenu(x, y, entries);
-    }
-
-    /** 组织菜单的目标文件夹选择器（基于当前选中项，非右键拖拽）。 */
-    private List<CtxEntry> organizeFolderChoices(boolean copy) {
-        List<CtxEntry> result = new ArrayList<>();
-        List<VirtualFileSystem.Entry> sel = new ArrayList<>(selected);
-        collectOrganizeFolderChoices(result, DiskFolder.ROOT_ID, copy, sel, 0);
-        if (result.isEmpty()) {
-            result.add(CtxEntry.action(t("informationera.fe.no_folder"), () -> {
-            }));
-        }
-        return result;
-    }
-
-    private void collectOrganizeFolderChoices(List<CtxEntry> out, String key, boolean copy,
-                                              List<VirtualFileSystem.Entry> sel, int depth) {
-        VirtualFileSystem.Folder folder = fs.folder(key);
-        if (folder == null) {
-            return;
-        }
-        if (depth > 0 && !sel.isEmpty()) {
-            String label = (depth > 1 ? "— ".repeat(depth - 1) : "") + folder.name;
-            out.add(CtxEntry.action(label, () -> moveOrCopy(currentKey, sel, key, copy)));
-        }
-        for (VirtualFileSystem.Entry entry : folder.entries) {
-            if (entry.folder && entry.childKey != null) {
-                boolean selfOrChild = false;
-                for (VirtualFileSystem.Entry de : sel) {
-                    if (de.folder && de.childKey != null && entry.childKey.startsWith(de.childKey)) {
-                        selfOrChild = true;
-                        break;
-                    }
-                }
-                if (selfOrChild) {
-                    continue;
-                }
-                if (depth < 4) {
-                    collectOrganizeFolderChoices(out, entry.childKey, copy, sel, depth + 1);
-                }
-            }
-        }
     }
 
     private void cancelSelection() {
@@ -3221,11 +3205,11 @@ public final class FileExplorerController {
         if (pane == null) {
             return;
         }
+        // 右上角两个放大镜按钮：加号放大、减号缩小（不再用「小 / 中 / 大」三档）。
         StringBuilder toolbar = new StringBuilder();
-        toolbar.append("<div class=\"fe-preview-toolbar\">");
-        toolbar.append(previewSizeButton(t("informationera.fe.small"), 48));
-        toolbar.append(previewSizeButton(t("informationera.fe.medium"), 64));
-        toolbar.append(previewSizeButton(t("informationera.fe.large"), 128));
+        toolbar.append("<div class=\"fe-preview-head\">");
+        toolbar.append(zoomButton("out", previewSize <= PREVIEW_SIZE_MIN));
+        toolbar.append(zoomButton("in", previewSize >= PREVIEW_SIZE_MAX));
         toolbar.append("</div>");
 
         if (selected.size() == 1) {
@@ -3241,31 +3225,144 @@ public final class FileExplorerController {
                 sb.append("<div class=\"fe-preview-line\">").append(t("informationera.fe.detail_size", formatSize(entry.size))).append("</div>");
             }
             sb.append("<div class=\"fe-preview-line\">").append(t("informationera.fe.detail_modified_short", escape(entry.modified))).append("</div>");
+            if (!entry.folder) {
+                // 物品再多两段：物品自己的提示框，以及可展开折叠的 NBT 查看器。
+                ItemStack stack = stackForEntry(entry);
+                if (!stack.isEmpty()) {
+                    sb.append(tooltipHtml(stack));
+                    sb.append(nbtHtml(stack));
+                }
+            }
             pane.setInnerHTML(sb.toString());
         } else if (selected.size() > 1) {
             pane.setInnerHTML(toolbar.toString() + "<div class=\"fe-preview-empty\">" + t("informationera.fe.detail_selected", selected.size()) + "</div>");
         } else {
             pane.setInnerHTML(toolbar.toString() + "<div class=\"fe-preview-empty\">" + t("informationera.fe.detail_none") + "</div>");
         }
-        bindPreviewSizeButtons();
+        bindPreviewZoomButtons();
+        bindPreviewNbt();
+        // 预览窗格里的图标是这里新建的元素，必须再喂一次驱动栈——否则那个 <item> 没有栈，
+        // 什么也画不出来（内容区的图标是 renderContent 那边喂的，管不到这里）。
+        driveItemIcons();
     }
 
-    private String previewSizeButton(String label, int size) {
-        boolean active = previewSize == size;
-        return "<button class=\"fe-preview-size" + (active ? " active" : "") + "\" data-size=\"" + size + "\">" + label + "</button>";
+    /**
+     * 右上角的放大镜按钮。
+     *
+     * @param kind    {@code in} 放大 / {@code out} 缩小
+     * @param atLimit 已经到上下限：按钮变暗，点了也不动
+     */
+    private String zoomButton(String kind, boolean atLimit) {
+        boolean zoomIn = "in".equals(kind);
+        return "<button class=\"fe-preview-zoom" + (atLimit ? " disabled" : "")
+                + "\" data-zoom=\"" + kind + "\" aria-label=\""
+                + (zoomIn ? t("informationera.fe.zoom_in") : t("informationera.fe.zoom_out")) + "\">"
+                + zoomIcon(zoomIn) + "</button>";
     }
 
-    private void bindPreviewSizeButtons() {
-        for (Element btn : document.querySelectorAll(".fe-preview-size")) {
-            String sizeStr = btn.getAttribute("data-size");
-            btn.addEventListener("click", e -> {
-                if (sizeStr != null) {
-                    try {
-                        previewSize = Integer.parseInt(sizeStr);
-                    } catch (NumberFormatException ignored) {
+    /** 放大镜图标：镜筒 + 中间的加号或减号。 */
+    private static String zoomIcon(boolean zoomIn) {
+        return "<svg viewBox=\"0 0 24 24\">"
+                + "<circle cx=\"10\" cy=\"10\" r=\"6\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"/>"
+                + "<line x1=\"14.5\" y1=\"14.5\" x2=\"20\" y2=\"20\" stroke=\"currentColor\" stroke-width=\"2\"/>"
+                + "<path d=\"" + (zoomIn ? "M10 7v6M7 10h6" : "M7 10h6")
+                + "\" stroke=\"currentColor\" stroke-width=\"2\"/>"
+                + "</svg>";
+    }
+
+    /** 当前选中条目对应的真实物品栈；文件夹或取不到时返回空。 */
+    private ItemStack stackForEntry(VirtualFileSystem.Entry entry) {
+        if (fs == null || entry == null || entry.folder || entry.itemKey == null) {
+            return ItemStack.EMPTY;
+        }
+        return fs.iconStackOf(entry, DiskClient.registryProvider());
+    }
+
+    /**
+     * 预览里的物品提示框。
+     *
+     * <p>行用原版的 {@code getTooltipLines} 取（附魔、耐久、属性、模组自己加的 tooltip 都在里面），
+     * 每行再用 {@code toFlatList} 拆成「样式已解析」的片段——这样颜色能跟游戏里对上，
+     * 而不是整行一个色。
+     */
+    private String tooltipHtml(ItemStack stack) {
+        Minecraft mc = Minecraft.getInstance();
+        List<Component> lines = stack.getTooltipLines(
+                net.minecraft.world.item.Item.TooltipContext.of(mc.level),
+                mc.player, TooltipFlag.Default.NORMAL);
+        StringBuilder sb = new StringBuilder("<div class=\"fe-preview-tips\">");
+        for (Component line : lines) {
+            sb.append("<div class=\"fe-preview-tip\">");
+            for (Component part : line.toFlatList()) {
+                Style style = part.getStyle();
+                TextColor color = style.getColor();
+                sb.append("<span");
+                if (color != null || style.isItalic() || style.isBold()) {
+                    sb.append(" style=\"");
+                    if (color != null) {
+                        sb.append("color:#")
+                          .append(String.format(Locale.ROOT, "%06X", color.getValue() & 0xFFFFFF))
+                          .append(';');
                     }
-                    updatePreview();
+                    if (style.isItalic()) {
+                        sb.append("font-style:italic;");
+                    }
+                    if (style.isBold()) {
+                        sb.append("font-weight:bold;");
+                    }
+                    sb.append('"');
                 }
+                sb.append('>').append(escape(part.getString())).append("</span>");
+            }
+            sb.append("</div>");
+        }
+        return sb.append("</div>").toString();
+    }
+
+    /**
+     * 可展开折叠的 NBT 查看器：物品组件的 SNBT 原样列出来，没有组件就明说。
+     *
+     * <p>折叠状态记在 {@link #nbtExpanded} 上，所以换选中项再回来仍然是展开的。
+     */
+    private String nbtHtml(ItemStack stack) {
+        String snbt = ItemStacks.nbtOf(stack, DiskClient.registryProvider());
+        boolean empty = snbt == null || snbt.isEmpty();
+        StringBuilder sb = new StringBuilder();
+        sb.append("<div class=\"fe-nbt\">");
+        sb.append("<div class=\"fe-nbt-head\" data-action=\"nbt\">")
+          .append("<span class=\"fe-nbt-chevron\">").append(nbtExpanded ? "▾" : "▸").append("</span>")
+          .append("<span>").append(t("informationera.fe.nbt")).append("</span>")
+          .append("</div>");
+        if (nbtExpanded) {
+            sb.append("<div class=\"fe-nbt-body\">")
+              .append(escape(empty ? t("informationera.fe.nbt_empty") : snbt))
+              .append("</div>");
+        }
+        sb.append("</div>");
+        return sb.toString();
+    }
+
+    /** NBT 查看器的展开 / 折叠。 */
+    private void bindPreviewNbt() {
+        for (Element head : document.querySelectorAll(".fe-nbt-head")) {
+            head.addEventListener("click", e -> {
+                nbtExpanded = !nbtExpanded;
+                updatePreview();
+            });
+        }
+    }
+
+    /** 放大镜按钮：每次按步长加减，并夹在上下限之间。 */
+    private void bindPreviewZoomButtons() {
+        for (Element btn : document.querySelectorAll(".fe-preview-zoom")) {
+            String kind = btn.getAttribute("data-zoom");
+            btn.addEventListener("click", e -> {
+                if ("in".equals(kind)) {
+                    previewSize = Math.min(PREVIEW_SIZE_MAX, previewSize + PREVIEW_SIZE_STEP);
+                } else if ("out".equals(kind)) {
+                    previewSize = Math.max(PREVIEW_SIZE_MIN, previewSize - PREVIEW_SIZE_STEP);
+                }
+                updatePreview();
             });
         }
     }
@@ -5125,9 +5222,20 @@ public final class FileExplorerController {
             // 磁盘（磁盘根）也是一张卡，不该画成文件夹。
             return DiskFolder.ROOT_ID.equals(entry.childKey) ? diskIcon(size) : folderIcon(size);
         }
-        return "<span class=\"fe-item-icon\" data-icon-for=\"" + escapeAttr(entry.id) + "\""
+        // 物品图标必须套一层 display slot：<item> 只会按「16px × iconScale」画，而 iconScale
+        // 只从祖先 <slot> 上取——光给宿主元素设宽高，它照样是 16px，不跟视图档位变。
+        // interactive/pointer 关掉、CSS 里也不要底图：这一层只负责画图标，不参与命中，
+        // 行的点击与拖拽仍然由行容器统一处理。
+        return "<slot class=\"fe-item-icon\" data-icon-for=\"" + escapeAttr(entry.id) + "\""
+                + " render=\"item\" interactive=\"0\" pointer=\"0\""
+                + " size=\"" + size + "\" iconScale=\"" + iconScaleFor(size) + "\""
                 + " style=\"width:" + size + "px;height:" + size + "px\">"
-                + "<item interactive=\"0\"></item></span>";
+                + "<item interactive=\"0\"></item></slot>";
+    }
+
+    /** 物品图标的缩放系数：<item> 的基础尺寸是 16px，要画成 size 像素就得乘这个数。 */
+    static String iconScaleFor(int size) {
+        return String.valueOf(size / 16.0);
     }
 
     /**
@@ -5136,6 +5244,9 @@ public final class FileExplorerController {
      * <p>这一步必须在 DOM 建好之后做：{@code setDrivenState} 需要拿到已经存在的元素实例。
      */
     private void driveItemIcons() {
+        if (fs == null) {
+            return;
+        }
         List<Element> icons = document.querySelectorAll(".fe-item-icon");
         if (icons == null || icons.isEmpty()) {
             return;

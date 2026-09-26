@@ -67,6 +67,30 @@ public class StorageCardItem extends Item {
         return text.length() <= 4 ? text : text.substring(text.length() - 4);
     }
 
+    /** 卡上记的磁盘名；没同步过返回空串。 */
+    public static String diskNameOf(ItemStack stack) {
+        if (stack == null || stack.isEmpty()) {
+            return "";
+        }
+        String name = stack.get(ModDataComponents.DISK_NAME.get());
+        return name == null ? "" : name;
+    }
+
+    /**
+     * 把磁盘当前的名字写到卡上。
+     *
+     * <p>名字的真身在服务端的磁盘数据里，卡上这份只是给 tooltip 看的副本；服务端每处理完一次
+     * 请求就刷新一次，所以改完盘名之后再拿起这张卡，看到的就是新名字。
+     */
+    public static void applyDiskName(ItemStack stack, String name) {
+        if (stack == null || stack.isEmpty() || name == null || name.isEmpty()) {
+            return;
+        }
+        if (!name.equals(diskNameOf(stack))) {
+            stack.set(ModDataComponents.DISK_NAME.get(), name);
+        }
+    }
+
     @Override
     public void appendHoverText(ItemStack stack, TooltipContext context, List<Component> tooltip, TooltipFlag flag) {
         UUID id = diskId(stack);
@@ -74,8 +98,10 @@ public class StorageCardItem extends Item {
             tooltip.add(Component.translatable("item.informationera.storage_card.unbound")
                     .withStyle(ChatFormatting.DARK_GRAY));
         } else {
-            tooltip.add(Component.translatable("item.informationera.storage_card.bound", defaultDiskName(id))
-                    .withStyle(ChatFormatting.AQUA));
+            // 从没插进过设备的卡没有名字副本，退回 uuid 后四位——那本来就是它的初始名。
+            String name = diskNameOf(stack);
+            tooltip.add(Component.translatable("item.informationera.storage_card.bound",
+                    name.isEmpty() ? defaultDiskName(id) : name).withStyle(ChatFormatting.AQUA));
         }
         tooltip.add(Component.translatable("item.informationera.storage_card.tooltip",
                 CAPACITY_PER_CARD * stack.getCount()).withStyle(ChatFormatting.GRAY));

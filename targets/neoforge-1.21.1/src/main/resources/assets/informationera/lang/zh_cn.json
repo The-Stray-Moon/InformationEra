@@ -4,7 +4,7 @@
 
   "item.informationera.storage_card": "储存卡",
   "item.informationera.storage_card.tooltip": "为信息磁盘提供 %s 个物品的储存空间",
-  "item.informationera.storage_card.bound": "磁盘 ID %s",
+  "item.informationera.storage_card.bound": "磁盘 %s",
   "item.informationera.storage_card.unbound": "未绑定磁盘：插进设备后才会分配",
   "item.informationera.quantum_collapse_reactor": "量子坍缩反应炉",
   "item.informationera.quantum_collapse_reactor.tooltip": "装备后可将物品坍缩为信息，或把信息还原为物品",
@@ -42,6 +42,10 @@
   "informationera.fe.sort": "排序",
   "informationera.fe.layout": "查看",
   "informationera.fe.preview": "预览窗格",
+  "informationera.fe.nbt": "NBT",
+  "informationera.fe.nbt_empty": "无 NBT 数据",
+  "informationera.fe.zoom_in": "放大图标",
+  "informationera.fe.zoom_out": "缩小图标",
   "informationera.fe.details": "详细信息",
   "informationera.fe.thumb": "大缩略图",
 

@@ -407,6 +407,8 @@ public final class FileExplorerWindow {
             }
             String html = dragSource.ghostHtmlFor(dragEntries);
             showGlobalGhost(html);
+            // 虚影挂在任务栏 Overlay 上（另一个 Document），内容区那套喂栈管不到它。
+            dragSource.driveGhostIcons();
         }
 
         moveGlobalGhost();

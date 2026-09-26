@@ -490,31 +490,44 @@
     background: var(--ore-edge-light);
 }
 
-.fe-preview-toolbar {
+/* 右上角的两个放大镜按钮：加号放大、减号缩小。 */
+.fe-preview-head {
     display: flex;
+    justify-content: flex-end;
     gap: 4px;
     margin-bottom: 10px;
 }
 
-.fe-preview-size {
-    min-height: 24px;
-    padding: 2px 8px;
+.fe-preview-zoom {
+    width: 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     border: 2px solid transparent;
     color: var(--ore-ink-muted);
     background: transparent;
     cursor: pointer;
-    font-size: var(--ore-font-sm);
 }
 
-.fe-preview-size:hover {
+.fe-preview-zoom svg {
+    width: 16px;
+    height: 16px;
+}
+
+.fe-preview-zoom:hover {
     color: #ffffff;
     background: var(--ore-surface);
 }
 
-.fe-preview-size.active {
-    color: #ffffff;
-    background: var(--ore-surface);
-    border-color: var(--ore-edge);
+/* 已经到上下限：按钮变暗，点了也不动。 */
+.fe-preview-zoom.disabled {
+    color: var(--ore-edge);
+    cursor: default;
+}
+
+.fe-preview-zoom.disabled:hover {
+    background: transparent;
 }
 
 .fe-preview-icon {
@@ -542,6 +555,62 @@
 .fe-preview-empty {
     color: var(--ore-ink-muted);
     font-size: var(--ore-font-sm);
+}
+
+/* 预览里的物品提示框：按行排，颜色用原版样式（附魔灰、属性蓝之类），
+   所以每行再拆成若干 span，颜色由 Java 侧按已解析的样式写进内联样式。 */
+.fe-preview-tips {
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: 2px solid var(--ore-edge);
+}
+
+.fe-preview-tip {
+    color: var(--ore-ink);
+    font-size: var(--ore-font-sm);
+    margin-bottom: 2px;
+}
+
+/* 可展开折叠的 NBT 查看器。 */
+.fe-nbt {
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: 2px solid var(--ore-edge);
+}
+
+.fe-nbt-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--ore-ink-muted);
+    font-size: var(--ore-font-sm);
+    cursor: pointer;
+}
+
+.fe-nbt-head:hover {
+    color: #ffffff;
+}
+
+.fe-nbt-chevron {
+    width: 12px;
+    text-align: center;
+}
+
+.fe-nbt-body {
+    margin: 6px 0 0;
+    padding: 6px 8px;
+    max-height: 240px;
+    overflow: auto;
+    color: var(--ore-ink);
+    background: var(--ore-canvas);
+    border: 2px solid var(--ore-edge);
+    font-size: var(--ore-font-sm);
+    white-space: pre-wrap;
+}
+
+/* NBT 用等宽字体更好读；页面顶部那条 !important 的雅黑规则要靠更高的选择器压过去。 */
+.fe .fe-nbt-body {
+    font-family: Consolas, "Courier New", monospace !important;
 }
 
 .fe-details-pane {
@@ -935,8 +1004,10 @@
     height: 16px;
 }
 
-/* 物品图标：真实物品由 <item> 绘制，这里只负责占位尺寸与居中。
-   <item> 没有固有尺寸，必须由宿主元素给出宽高，否则异步资源就绪后布局会跳。 */
+/* 物品图标：真实物品由 <item> 绘制。
+   <item> 只会按「16px × iconScale」画，而 iconScale 只认祖先 <slot>——光给宿主设宽高它不会变大。
+   所以物品图标本身就是一层 display slot（render="item"）：只画物品、不要底图、不参与命中，
+   行的点击与拖拽仍由行容器统一处理。尺寸与缩放由 Java 侧按当前视图档位写进内联样式。 */
 .fe-item-icon {
     display: inline-flex;
     flex: 0 0 auto;
@@ -944,12 +1015,9 @@
     justify-content: center;
     line-height: 0;
     vertical-align: middle;
-}
-
-.fe-item-icon > item {
-    display: block;
-    width: 100%;
-    height: 100%;
+    pointer-events: none;
+    background-image: none;
+    background-color: transparent;
 }
 
 .fe-cell > .fe-item-icon {
@@ -1795,9 +1863,14 @@
     justify-content: center;
 }
 
+/* 格子里的物品图标也是一层 display slot：只要物品本身，不要底图，也不参与命中。 */
 .fe-start-icon {
+    display: block;
     width: 24px;
     height: 24px;
+    pointer-events: none;
+    background-image: none;
+    background-color: transparent;
 }
 
 .fe-start-hint {

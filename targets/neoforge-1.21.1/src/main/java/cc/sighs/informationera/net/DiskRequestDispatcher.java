@@ -66,6 +66,8 @@ public final class DiskRequestDispatcher {
         // STATUS 只回设备插槽：切界面就会发一次，不该每次都把整棵树推一遍。
         if (result.isOk() && packet.kind() != RequestType.STATUS && !device.card().isEmpty()) {
             disk = resolveDisk(player, store, device);
+            // 把磁盘当前的名字同步到卡上：tooltip 上显示的名字要跟着磁盘改名走。
+            StorageCardItem.applyDiskName(device.card(), disk.diskName());
             disk.purgeExpiredRecycleEntries(System.currentTimeMillis());
         }
         if (result.isOk()) {

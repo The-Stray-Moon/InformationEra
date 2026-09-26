@@ -4,7 +4,7 @@
 
   "item.informationera.storage_card": "Storage Card",
   "item.informationera.storage_card.tooltip": "Provides %s items of storage space for the Information Disk",
-  "item.informationera.storage_card.bound": "Disk ID %s",
+  "item.informationera.storage_card.bound": "Disk %s",
   "item.informationera.storage_card.unbound": "Unbound: gets its disk id on first insert",
   "item.informationera.quantum_collapse_reactor": "Quantum Collapse Reactor",
   "item.informationera.quantum_collapse_reactor.tooltip": "Collapses items into information, and restores information into items",
@@ -42,6 +42,10 @@
   "informationera.fe.sort": "Sort",
   "informationera.fe.layout": "View",
   "informationera.fe.preview": "Preview pane",
+  "informationera.fe.nbt": "NBT",
+  "informationera.fe.nbt_empty": "No NBT data",
+  "informationera.fe.zoom_in": "Zoom in",
+  "informationera.fe.zoom_out": "Zoom out",
   "informationera.fe.details": "Details",
   "informationera.fe.thumb": "Large icons",
 
