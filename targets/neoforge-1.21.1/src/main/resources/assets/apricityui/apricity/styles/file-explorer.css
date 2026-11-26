@@ -1005,10 +1005,11 @@
 }
 
 /* 物品图标：真实物品由 <item> 绘制。
-   <item> 只会按「16px × iconScale」画，而 iconScale 只认祖先 <slot>——光给宿主设宽高它不会变大。
-   所以物品图标本身就是一层 display slot（render="item"）：只画物品、不要底图、不参与命中，
-   行的点击与拖拽仍由行容器统一处理。尺寸与缩放由 Java 侧按当前视图档位写进内联样式。 */
+   <item> 只会按 16px 画，放大靠 Java 侧写在元素上的 transform: scale()（AUI 支持
+   transform-origin，以盒子中心为原点缩放）。这一层只负责占位与居中，不参与命中，
+   行的点击与拖拽仍由行容器统一处理。 */
 .fe-item-icon {
+    position: relative;
     display: inline-flex;
     flex: 0 0 auto;
     align-items: center;
@@ -1016,8 +1017,18 @@
     line-height: 0;
     vertical-align: middle;
     pointer-events: none;
-    background-image: none;
-    background-color: transparent;
+}
+
+/* 大图标时的数量角标。小图标仍用 AUI 自带的角标（那个会跟着缩放，所以大图标不能用）。 */
+.fe-item-count {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    padding: 0 3px;
+    color: #ffffff;
+    background: rgba(0, 0, 0, 0.6);
+    font-size: 11px;
+    line-height: 14px;
 }
 
 .fe-cell > .fe-item-icon {
@@ -1335,6 +1346,9 @@
 .fe-ctx-menu {
     position: absolute;
     z-index: 600;
+    /* 抬 2px 的 Z：同文档里的物品图标走的是另一条绘制路径，光靠 z-index 排不到它们前面，
+       这里把菜单明确放到最近处，物品就不会再盖在菜单上。 */
+    transform: translateZ(2px);
     display: none;
     min-width: 200px;
     padding: 4px;
@@ -1709,6 +1723,8 @@
 .fe-tooltip {
     position: absolute;
     z-index: 650;
+    /* 同右键菜单：抬 2px 的 Z，避免被同文档里的物品图标盖住。 */
+    transform: translateZ(2px);
     display: none;
     pointer-events: none;
     max-width: 360px;
@@ -1863,14 +1879,14 @@
     justify-content: center;
 }
 
-/* 格子里的物品图标也是一层 display slot：只要物品本身，不要底图，也不参与命中。 */
+/* 格子里的物品图标：靠 Java 侧写在 <item> 上的 transform 放大，这里只负责占位与居中。 */
 .fe-start-icon {
-    display: block;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     width: 24px;
     height: 24px;
     pointer-events: none;
-    background-image: none;
-    background-color: transparent;
 }
 
 .fe-start-hint {

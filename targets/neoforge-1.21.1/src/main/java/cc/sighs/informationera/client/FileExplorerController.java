@@ -5222,15 +5222,26 @@ public final class FileExplorerController {
             // 磁盘（磁盘根）也是一张卡，不该画成文件夹。
             return DiskFolder.ROOT_ID.equals(entry.childKey) ? diskIcon(size) : folderIcon(size);
         }
-        // 物品图标必须套一层 display slot：<item> 只会按「16px × iconScale」画，而 iconScale
-        // 只从祖先 <slot> 上取——光给宿主元素设宽高，它照样是 16px，不跟视图档位变。
-        // interactive/pointer 关掉、CSS 里也不要底图：这一层只负责画图标，不参与命中，
-        // 行的点击与拖拽仍然由行容器统一处理。
-        return "<slot class=\"fe-item-icon\" data-icon-for=\"" + escapeAttr(entry.id) + "\""
-                + " render=\"item\" interactive=\"0\" pointer=\"0\""
-                + " size=\"" + size + "\" iconScale=\"" + iconScaleFor(size) + "\""
-                + " style=\"width:" + size + "px;height:" + size + "px\">"
-                + "<item interactive=\"0\"></item></slot>";
+        // <item> 自己永远只按 16px 画（内建的 iconScale 只认真槽，这里不用槽），所以直接对元素做
+        // CSS 缩放：AUI 支持 transform / transform-origin，以盒子中心为原点放大，图标正好居中。
+        String label = entry.count > 1L ? ItemStacks.overlayText(entry.count) : null;
+        StringBuilder sb = new StringBuilder();
+        sb.append("<span class=\"fe-item-icon\" data-icon-for=\"").append(escapeAttr(entry.id))
+          .append("\" style=\"width:").append(size).append("px;height:").append(size).append("px\">");
+        sb.append("<item interactive=\"0\" style=\"width:").append(size).append("px;height:").append(size).append("px");
+        if (size > 16) {
+            // 只有真要放大时才上 transform：它会把物品推进 AUI 的「带变换」绘制路径，绝对 Z 会
+            // 和同文档的面板（右键菜单等）撞在一起。16px 的平铺视图没必要付这个代价。
+            sb.append(";transform:scale(").append(iconScaleFor(size))
+              .append(");transform-origin:50% 50%");
+        }
+        sb.append("\"></item>");
+        // 大图标的数量角标自己画：AUI 自带角标画在物品的 pose 里，会跟着图标一起放大，糊一大片。
+        if (size > 16 && label != null) {
+            sb.append("<span class=\"fe-item-count\">").append(escape(label)).append("</span>");
+        }
+        sb.append("</span>");
+        return sb.toString();
     }
 
     /** 物品图标的缩放系数：<item> 的基础尺寸是 16px，要画成 size 像素就得乘这个数。 */
@@ -5269,8 +5280,11 @@ public final class FileExplorerController {
             if (stack.isEmpty()) {
                 continue;
             }
-            // overlayText 传 null：让渲染层自己用真实数量画角标。
-            itemElement.setDrivenState(stack, ItemStacks.overlayText(entry.count), false, false, Item.Source.INGREDIENT);
+            // 大图标时角标是我们自己画的（.fe-item-count），这时别再让 AUI 画一份——
+            // 它的角标画在物品的 pose 里，会跟着图标一起放大。
+            String overlay = icon.querySelector(".fe-item-count") != null
+                    ? null : ItemStacks.overlayText(entry.count);
+            itemElement.setDrivenState(stack, overlay, false, false, Item.Source.INGREDIENT);
         }
     }
 

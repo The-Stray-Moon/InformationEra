@@ -129,17 +129,13 @@ public final class StartMenuController {
         driveIcons();
     }
 
-    /**
-     * 格子里的物品图标。
-     *
-     * <p>{@code <item>} 只会按「16px × iconScale」画，iconScale 又只认祖先 {@code <slot>}，
-     * 所以这里必须套一层 display slot 才能把图标画大；槽本身只画物品，不要底图、不参与命中。
-     */
+    /** 格子里的物品图标：{@code <item>} 只会按 16px 画，所以对元素做 CSS 缩放把图标放大到格子大小。 */
     private static String iconHtml() {
-        return "<slot class=\"fe-start-icon\" render=\"item\" interactive=\"0\" pointer=\"0\""
-                + " size=\"" + ICON_SIZE + "\" iconScale=\"" + FileExplorerController.iconScaleFor(ICON_SIZE) + "\""
+        return "<span class=\"fe-start-icon\""
                 + " style=\"width:" + ICON_SIZE + "px;height:" + ICON_SIZE + "px\">"
-                + "<item interactive=\"0\"></item></slot>";
+                + "<item interactive=\"0\" style=\"width:" + ICON_SIZE + "px;height:" + ICON_SIZE + "px;"
+                + "transform:scale(" + FileExplorerController.iconScaleFor(ICON_SIZE)
+                + ");transform-origin:50% 50%\"></item></span>";
     }
 
     private static String slotHtml(String slotId, ItemStack stack) {

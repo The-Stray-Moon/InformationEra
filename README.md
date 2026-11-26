@@ -1,12 +1,6 @@
 # Information Era
 
-使用 `common + targets/<loader>-<minecraft-version>` 结构开发的 Minecraft 模组，作者 [Tower of Sighs](https://github.com/Tower-of-Sighs)。
-
-包名与 Gradle group 为 `cc.sighs.informationera`，mod id 为 `informationera`。
-
-快速迁移请对 AI 这么说：
-
-“使用 https://github.com/Tower-of-Sighs/SighsTemple 框架来重构本项目，第一步先将当前mc版本的所有源码及资源迁移至common部分，第二步将明确查询源码证实了存在明显版本差异的内容转移到targets中的对应版本下，第三步搭建spi模式，将targets中的内容抽象化，只保留具体实现差异，共通逻辑迁移回common部分，第四步将当前targets下的主版本内容移植到全部所有版本。”
+使用 `common + targets/<loader>-<minecraft-version>` 结构开发的 Minecraft 模组。
 
 ## IDEA
 
@@ -55,30 +49,3 @@ targets/neoforge-26.1/libs/
 ```
 
 本地 jar 的传递依赖无法自动推导。若某个 jar 还依赖其他库，需要将这些库也放入同一个 `libs/` 目录，或按常规方式声明依赖。
-
-## 发布
-
-每个 target 都提供 `publishMods`，可手动发布其自身的产物至 CurseForge 与 Modrinth。两个平台的项目 ID 是所有 target 共用的非敏感信息，在根 `gradle.properties` 中取消注释并填写：
-
-```properties
-publish_curseforge_project_id=你的CurseForge项目ID
-publish_modrinth_project_id=你的Modrinth项目ID
-```
-
-token 只从环境变量读取，不要写入仓库。PowerShell 示例：
-
-```powershell
-$env:CURSEFORGE_TOKEN = '...'
-$env:MODRINTH_TOKEN = '...'
-$env:PUBLISH_CHANGELOG = '本次版本的更新说明' # 可选
-
-cd targets\forge-1.20.1
-.\gradlew.bat publishMods
-```
-
-将目录替换为其他 target 即可单独发布对应加载器和 Minecraft 版本。Fabric 会上传重映射后的 jar；Forge 与 NeoForge 上传各自的最终 jar。
-
-## 版本参考
-
-- [Minecraft 1.20.1、1.21.1、26.1 完整迁移差异参考](docs/version-differences/README.md)
-- [多版本日常维护工作流](docs/MAINTENANCE_WORKFLOW.md)
