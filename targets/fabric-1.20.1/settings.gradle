@@ -6,8 +6,4 @@ pluginManagement {
     }
 }
 
-rootProject.name = 'InformationEra-fabric-1.20.1'
-
-include 'common'
-project(':common').projectDir = file('../../common')
-
+rootProject.name = 'Information Era-fabric-1.20.1'

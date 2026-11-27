@@ -4,20 +4,18 @@ plugins {
     id 'me.modmuss50.mod-publish-plugin' version '2.1.1'
 }
 
-def properties = new Properties()
-file('../../gradle.properties').withInputStream { properties.load(it) }
-file('gradle.properties').withInputStream { properties.load(it) }
-properties.each { key, value -> ext.set(key.toString(), value.toString()) }
-
-group = mod_group_id
-version = mod_version
-
-base {
-    archivesName = "${mod_name.replaceAll('\\s', '')}-neoforge-1.21.1"
-}
+apply from: file('../../gradle/target-conventions/shared.gradle')
 
 java {
     toolchain.languageVersion = JavaLanguageVersion.of(21)
+}
+
+commonJava {
+    // Exclude only common files with confirmed differences for this target.
+}
+
+tasks.named('sourcesJar', Jar).configure {
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 }
 
 neoForge {
@@ -26,7 +24,9 @@ neoForge {
     runs {
         client {
             client()
+            gameDirectory = file('run')
         }
+
         server {
             server()
             programArgument '--nogui'
@@ -40,44 +40,30 @@ neoForge {
     }
 }
 
-// 把 common 的 class 输出并入本 target 的 main sourceSet 输出。
-// 这是必需的：moddev 只会把 sourceSet 的输出放进 mod 的运行时 classpath，
-// 而 `implementation project(':common')` 只保证编译期可见——少了这一句，
-// 运行时一碰 common 的类就会 NoClassDefFoundError（开发环境尤其明显）。
-// 同时也让 final jar 自动包含 common 的 class，无需再手工 from(...)。
-sourceSets.main.output.dir(
-        project(':common').layout.buildDirectory.dir('classes/java/main'),
-        builtBy: ':common:classes'
-)
-
 repositories {
     mavenCentral()
+    mavenLocal()
     maven { url = 'https://maven.sighs.cc/repository/maven-public/' }
-    // Curios（饰品槽）的官方 maven 是 maven.theillusivec4.top，但那个域名在部分网络下
-    // 会被连接重置，这里改走 Modrinth 的 maven——同一个发布 jar，坐标不同而已。
-    maven { url = 'https://api.modrinth.com/maven' }
 }
 
 dependencies {
-    implementation "com.sighs:ApricityUI-neoforge-1.21.1:1.3.2"
-    implementation project(':common')
-    // Curios：物品要做成饰品、服务端要判断「是否装备」，都需要它的 API。
-    // 按官方推荐拆开——编译只拿 API，运行期才需要本体（开发环境靠 runtimeOnly 带上）。
+    implementation 'com.sighs:ApricityUI-neoforge-1.21.1:1.3.2'
     compileOnly "maven.modrinth:curios:${curios_version}"
     runtimeOnly "maven.modrinth:curios:${curios_version}"
 }
 
 tasks.named('processResources', ProcessResources).configure {
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
     def replaceProperties = [
-            minecraft_version: neoforge_121_minecraft_version,
-            neoforge_version: neoforge_121_version,
+            minecraft_version     : neoforge_121_minecraft_version,
+            neoforge_version      : neoforge_121_version,
             neoforge_version_range: neoforge_121_version_range,
-            mod_id: mod_id,
-            mod_name: mod_name,
-            mod_license: mod_license,
-            mod_version: mod_version,
-            mod_authors: mod_authors,
-            mod_description: mod_description
+            mod_id                : mod_id,
+            mod_name              : mod_name,
+            mod_license           : mod_license,
+            mod_version           : mod_version,
+            mod_authors           : mod_authors,
+            mod_description       : mod_description
     ]
     inputs.properties replaceProperties
     filesMatching('META-INF/neoforge.mods.toml') {
@@ -85,8 +71,5 @@ tasks.named('processResources', ProcessResources).configure {
     }
 }
 
-tasks.withType(JavaCompile).configureEach {
-    options.encoding = 'UTF-8'
-}
-
+apply from: file('../../gradle/target-conventions/hot-debug.gradle')
 apply from: file('../../gradle/target-conventions/publish.gradle')

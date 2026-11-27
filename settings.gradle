@@ -1,4 +1,5 @@
-rootProject.name = 'InformationEra'
+rootProject.name = 'Information Era'
 
-include 'common'
-
+includeBuild('common') {
+    name = 'common'
+}

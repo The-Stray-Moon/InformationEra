@@ -1,6 +1,9 @@
 [CmdletBinding()]
 param(
-    [string] $TargetsRoot = (Join-Path (Split-Path -Parent $PSScriptRoot) 'targets')
+    [string] $TargetsRoot = (Join-Path (Split-Path -Parent $PSScriptRoot) 'targets'),
+
+    [AllowEmptyCollection()]
+    [string[]] $ChangedFiles
 )
 
 Set-StrictMode -Version Latest
@@ -60,8 +63,11 @@ foreach ($directory in Get-ChildItem -LiteralPath $TargetsRoot -Directory | Sort
         continue
     }
 
-    if (-not $properties.ContainsKey('ci.java') -or $properties['ci.java'] -notmatch '^[0-9]+$') {
-        throw "Target '$($directory.Name)' requires a numeric ci.java value"
+    $javaVersion = 0
+    if (-not $properties.ContainsKey('ci.java') -or
+        $properties['ci.java'] -notmatch '^[1-9][0-9]*$' -or
+        -not [int]::TryParse($properties['ci.java'], [ref] $javaVersion)) {
+        throw "Target '$($directory.Name)' requires a positive integer ci.java value"
     }
 
     $attempts = 3
@@ -81,6 +87,18 @@ foreach ($directory in Get-ChildItem -LiteralPath $TargetsRoot -Directory | Sort
 
 if ($entries.Count -eq 0) {
     throw 'No enabled targets found. Set ci.enabled=true for at least one target.'
+}
+
+if ($PSBoundParameters.ContainsKey('ChangedFiles')) {
+    $sharedChanges = @($ChangedFiles | Where-Object {
+        $_ -notmatch '^targets/' -or $_ -match '^targets/[^/]+/ci\.properties$'
+    })
+    if ($sharedChanges.Count -eq 0) {
+        $changedTargets = @($ChangedFiles | ForEach-Object {
+            if ($_ -match '^targets/([^/]+)/') { $Matches[1] }
+        } | Sort-Object -Unique)
+        $entries = @($entries | Where-Object { $_.target -in $changedTargets })
+    }
 }
 
 @{ include = @($entries) } | ConvertTo-Json -Compress -Depth 3

@@ -5,7 +5,7 @@
 本规范用于多个维护者分别负责不同 Minecraft 版本或加载器时的日常开发。目标是：
 
 1. target 维护者只下载、构建和评审自己负责的依赖。
-2. `common` 保持可预测、无加载器依赖，不被单个 target 的 API 污染。
+2. `common` 只承载没有确证版本差异的代码，不被单个 target 的临时判断或未确证差异污染。
 3. 跨版本行为变化有明确的评审和验证范围。
 4. 每个发布 jar 的兼容范围、构建 JDK 和责任人可追溯。
 
@@ -13,9 +13,13 @@
 
 | 路径 | 默认责任 | 可直接修改 | 额外评审 |
 | --- | --- | --- | --- |
-| `common/` | Core Maintainer | 共享业务逻辑、纯 Java 测试、稳定接口 | 至少一名受影响 target 维护者 |
+| `common/` | Core Maintainer | 无确证版本差异的共享代码、共享资源、共享测试 | 至少一名受影响 target 维护者 |
 | `targets/forge-1.20.1/` | Forge 1.20.1 Maintainer | Forge 入口、事件、资源、Mixin、适配器 | Core Maintainer 仅在 common 合约变化时参与 |
+| `targets/forge-1.19.2/` | Forge 1.19.2 Maintainer | Forge 入口、事件、资源、Mixin、适配器 | 同上 |
+| `targets/forge-1.18.2/` | Forge 1.18.2 Maintainer | Forge 入口、事件、资源、Mixin、适配器 | 同上 |
 | `targets/fabric-1.20.1/` | Fabric 1.20.1 Maintainer | Fabric entrypoint、callback、资源、Mixin、适配器 | 同上 |
+| `targets/fabric-1.21.1/` | Fabric 1.21.1 Maintainer | Fabric entrypoint、callback、资源、Mixin、适配器 | 同上 |
+| `targets/fabric-26.1/` | Fabric 26.1 Maintainer | Java 25、26.1 API、资源、渲染和适配器 | 同上 |
 | `targets/neoforge-1.21.1/` | NeoForge 1.21.1 Maintainer | NeoForge 入口、事件、资源、Mixin、适配器 | 同上 |
 | `targets/neoforge-26.1/` | NeoForge 26.1 Maintainer | Java 25、26.1 API、资源、渲染和适配器 | 同上 |
 | 根 Gradle、CI、`docs/` | Build / Release Maintainer | 聚合入口、CI 矩阵、维护文档 | 受影响 target 维护者 |
@@ -26,17 +30,17 @@
 
 ### common
 
-`common` 只能包含：
+`common` 包含所有没有确证版本差异的代码，可以引用 Minecraft 类型，也可以引用 loader、Mixin、渲染与网络 API；依赖平台类型不是拆分理由，Java 版本也不是。
 
-- Java 8 兼容的业务逻辑、数学、状态机、队列和不可变 DTO。
-- 不引用 Minecraft 类型的扩展接口、事件语义和渲染计划。
-- 无加载器依赖的单元测试。
+从 `common` 拆到 `targets/<loader>-<mc-version>/` 的唯一理由是：经阅读实际源码/API 确证该内容在不同 loader 或不同 Minecraft 版本之间存在差异。不能凭猜测拆，也不能为了“代码好看”拆。
 
 `common` 禁止包含：
 
-- `net.minecraft.*`、Forge、NeoForge、Fabric、Mixin、网络 buffer 或渲染 API。
-- 运行时 loader/version 判断、反射分发和某个 target 的资源路径。
-- 为解决单一 target 编译错误而加入的 Minecraft API 抽象泄漏。
+- 以运行时 loader/version 判断、反射分发或同名 class 覆盖来伪装兼容不同 target。
+- 某个 target 专属的资源路径。
+- 为掩盖某个 target 的编译错误而加入的抽象泄漏；正确做法是在该 target 的 `commonJava` 中 `exclude` 对应文件。
+
+版本差异通过 target 的 `commonJava` `exclude` 登记：某个 common 文件在该 target 上有确证差异时，在该 target 的 `commonJava` 里 `exclude '<路径>'`，并把该 target 自己的实现放进 target。
 
 ### target
 
@@ -70,7 +74,11 @@
 
 ```text
 target/forge-1.20.1/<topic>
+target/forge-1.19.2/<topic>
+target/forge-1.18.2/<topic>
 target/fabric-1.20.1/<topic>
+target/fabric-1.21.1/<topic>
+target/fabric-26.1/<topic>
 target/neoforge-1.21.1/<topic>
 target/neoforge-26.1/<topic>
 common/<topic>
@@ -82,7 +90,11 @@ docs/<topic>
 
 ```text
 forge-1.20.1: fix entity renderer registration
+forge-1.19.2: fix access transformer validation
+forge-1.18.2: backport block entity sync
 fabric-1.20.1: add client packet adapter
+fabric-1.21.1: update item template adapter
+fabric-26.1: migrate render pipeline
 neoforge-1.21.1: update data generation
 neoforge-26.1: migrate item template handling
 common: expose render-plan hook
@@ -104,8 +116,8 @@ docs: clarify release matrix
 
 ### common 改动
 
-1. 先写清楚新增或改变的业务语义，不以 Minecraft API 名称描述接口。
-2. 为 shared logic 添加或更新无加载器单元测试。
+1. 先写清楚新增或改变的语义，并确证它在各 loader 与 Minecraft 版本之间没有差异。
+2. 为 shared logic 添加或更新共享测试（`common/src/test/`，可用 `gradlew -p common test` 运行）。
 3. 由每个受影响 target 维护者更新桥接实现。
 4. 对每个受影响 target 独立构建；不要把根项目的单一构建结果当作全矩阵证明。
 5. 对不立即适配的 target，禁止静默合并。必须明确选择：同 PR 适配、feature flag 禁用、或在 issue/roadmap 中记录阻塞。
@@ -122,7 +134,7 @@ docs: clarify release matrix
 5. docs/tests: 更新支持矩阵与验证记录
 ```
 
-不能为了“统一代码”在 `common` 放入 `ItemStack`、`PoseStack`、`Holder`、`StreamCodec`、Fabric callback 或 Forge/NeoForge event。共享的是语义与数据，不是 Minecraft 对象。
+不能为“统一代码”而掩盖确证差异，也不能仅因为某段代码用了 `ItemStack`、`PoseStack`、`Holder`、`StreamCodec`、Fabric callback 或 Forge/NeoForge event 就拒绝把它放进 `common`；确证有差异的部分放进对应 target 并在其 `commonJava` 中 `exclude`。
 
 ## 渲染与客户端变化
 
@@ -151,48 +163,49 @@ targets/<name>/.../client/
 | Job | 目录 | Gradle JVM | 必须执行 |
 | --- | --- | --- | --- |
 | Forge 1.20.1 | `targets/forge-1.20.1` | JDK 21 | `./gradlew clean build` |
-| Fabric 1.20.1 | `targets/fabric-1.20.1` | JDK 21 | `./gradlew clean build` |
+| Forge 1.19.2 | `targets/forge-1.19.2` | JDK 21 | `./gradlew clean build` |
+| Forge 1.18.2 | `targets/forge-1.18.2` | JDK 21 | `./gradlew clean build` |
+| Fabric 1.20.1 | `targets/fabric-1.20.1` | JDK 17 | `./gradlew clean build` |
+| Fabric 1.21.1 | `targets/fabric-1.21.1` | JDK 21 | `./gradlew clean build` |
+| Fabric 26.1 | `targets/fabric-26.1` | JDK 25 | `./gradlew clean build` |
 | NeoForge 1.21.1 | `targets/neoforge-1.21.1` | JDK 21 | `./gradlew clean build` |
 | NeoForge 26.1 | `targets/neoforge-26.1` | JDK 25 | `./gradlew clean build` |
 
 补充规则：
 
-- 根 `-PallTargets=true build` 仅覆盖可由 JDK 21 同时构建的三个 target。它不是 NeoForge 26.1 的验证替代品。
+- 根 `-PallTargets=true build` 自动扫描 `targets/`，按 `ci.enabled` 与当前 Gradle JVM 是否满足 `ci.java` 选择目标，并打印需要更高 JDK 的跳过项；不维护版本白名单。它不能代替被跳过目标的独立验证，也不能保证旧 wrapper 支持任意更高 JDK。
 - 任何改动 `common/` 的 PR，至少触发所有当前支持 target 的 build job。
 - 任何改动一个 target 的资源、Mixin 或 metadata 的 PR，至少检查最终 jar 是否包含对应 metadata、配置文件和 common class。
 - 构建成功不代替运行验证。涉及事件、网络、Mixin、注册、渲染或数据包时，应在 PR 中记录 client、dedicated server、reload 或 data generation 的实际验证范围。
 
 ## Common 自动验证
 
-`.github/workflows/verify-common.yml` 是 `common` 的 CI 门禁。它在 push、pull request 或手动触发时，若检测到以下路径变更，则执行完整矩阵：
+`.github/workflows/verify-common.yml` 同时负责共享层和 target 的 CI 门禁。以下路径变更触发完整矩阵，手动运行也验证完整矩阵：
 
 ```text
 common/**
-build.gradle, settings.gradle, gradle.properties, gradle/**
-scripts/build-target.ps1
+build.gradle, settings.gradle, gradle.properties, gradle/**, gradlew, gradlew.bat
+docs/en/**
+scripts/build-target.ps1, scripts/discover-targets.ps1
+targets/**/ci.properties
 .github/workflows/verify-common.yml
 ```
 
+仅修改 `targets/**`（不含 `ci.properties`）时，根据 git diff 只选择改动的已启用 target，覆盖源码、资源、构建脚本和 wrapper。重命名按删除加新增处理，验证两端目标。没有基准提交的首次 push 验证完整矩阵；diff 失败则 CI 失败，不能静默漏检。空目标矩阵跳过 target job，但仍执行 common 测试。若同时修改非 target 路径，保守地验证完整矩阵。
+
 执行顺序：
 
-1. `common-tests` 使用 JDK 21 执行 `common` 的 `clean test`。
-2. 四个 target job 并行执行各自 wrapper 的 `clean build`。`build` 包含 target 和 common 的测试任务。
-3. 每个 target 使用对应 JDK：Forge/Fabric 1.20.1、NeoForge 1.21.1 使用 JDK 21；NeoForge 26.1 使用 JDK 25。
+1. `common-tests` 使用 JDK 21 执行 `common` 的 `test`。
+2. 选中的 target job 并行执行各自 wrapper 的 `clean build`；共享层改动覆盖全部八个已启用 target。`build` 包含 target 和 common 的测试任务。
+3. 每个 target 使用对应 JDK：`fabric-1.20.1` 使用 JDK 17；`fabric-26.1`、`neoforge-26.1` 使用 JDK 25；其余 target 使用 JDK 21。
 4. 成功或失败时上传已生成的 `build/libs/*.jar`，便于检查发布物。
+5. `Verify Builds` 汇总目标发现、common 测试和目标构建状态；只有验证成功或目标矩阵确实为空时才通过。
 
 `scripts/build-target.ps1` 对 target build 最多重试三次，专门处理首次解析 mappings、NeoForm 或 Maven 时的短暂网络失败。编译错误、测试错误和持续依赖错误仍会使 job 失败。
 
-建议在仓库分支保护中把以下检查设为合并必需条件：
+分支保护可要求固定的 `Verify Builds` 汇总检查，不要把所有动态 target job 都列为必需检查，否则 target-only 改动会等待未选中的目标。工作流使用路径过滤，纯文档 PR 不触发；配置分支保护时需考虑这类 PR，不要要求一个不会产生的检查。
 
-```text
-Common Unit Tests
-forge-1.20.1 (JDK 21)
-fabric-1.20.1 (JDK 21)
-neoforge-1.21.1 (JDK 21)
-neoforge-26.1 (JDK 25)
-```
-
-target-only 的快速验证工作流可以后续按同一模式增加，但不得替代 common 的全矩阵工作流。
+新增 target 按 `docs/CI_TARGET_DISCOVERY.md` 接入 `shared.gradle`；不要重复实现共享源码、测试或资源接入逻辑。target-only 的选择逻辑不得削弱共享层的全矩阵验证。
 
 ## PR 评审要求
 
@@ -206,7 +219,7 @@ target-only 的快速验证工作流可以后续按同一模式增加，但不�
 
 评审者检查：
 
-- 是否将平台 API 泄漏进 `common`。
+- 是否依据源码确证（而非猜测）来划分 `common` 与 target；确证有差异的文件应在对应 target 的 `commonJava` 中 `exclude`。
 - 是否把 1.20.1、1.21.1、26.1 的资源、Mixin 或客户端代码混入同一 target。
 - 是否更新了所有受影响的桥接实现。
 - 是否因工具链不兼容而错误使用根聚合替代独立构建。
@@ -219,10 +232,14 @@ target-only 的快速验证工作流可以后续按同一模式增加，但不�
 一个发布物只能对应一个 loader 与一个 Minecraft 版本：
 
 ```text
-InformationEra-forge-1.20.1-<version>.jar
-InformationEra-fabric-1.20.1-<version>.jar
-InformationEra-neoforge-1.21.1-<version>.jar
-InformationEra-neoforge-26.1-<version>.jar
+Information Era-forge-1.20.1-<version>.jar
+Information Era-forge-1.19.2-<version>.jar
+Information Era-forge-1.18.2-<version>.jar
+Information Era-fabric-1.20.1-<version>.jar
+Information Era-fabric-1.21.1-<version>.jar
+Information Era-fabric-26.1-<version>.jar
+Information Era-neoforge-1.21.1-<version>.jar
+Information Era-neoforge-26.1-<version>.jar
 ```
 
 不要发布混合 loader 的 universal jar。
@@ -244,7 +261,7 @@ InformationEra-neoforge-26.1-<version>.jar
 新增版本必须：
 
 1. 新建 `targets/<loader>-<minecraft-version>/`，不在旧 target 添加运行时版本分支。
-2. 提供独立 wrapper、`settings.gradle` 和 `../../common` 源码映射。
+2. 提供独立 wrapper 与 `settings.gradle`；加载自身插件后应用 `../../gradle/target-conventions/shared.gradle`，直接接入 common 原源码、资源和测试。target settings 不导入独立 common build，避免 IDE 重复源码根；不复制共享源码到 build，不重复添加共享源码集，也不使用 common jar 或 `project(':common')` 依赖。
 3. 指定责任人、最低 JDK、Gradle 版本、加载器版本和 CI job。
 4. 完成独立构建、client / server 最小验证和最终 jar 检查后，才标记为支持。
 

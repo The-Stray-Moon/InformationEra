@@ -1,29 +1,21 @@
 // Applied from an individual target project, not from the aggregate root project.
 apply plugin: 'maven-publish'
 
-repositories {
-    flatDir {
-        dirs layout.projectDirectory.dir('libs')
-    }
-}
-
-dependencies {
-    implementation fileTree(dir: file('libs'), include: ['*.jar'], exclude: ['*-sources.jar', '*-javadoc.jar'])
-}
-
-sourceSets.main.resources.srcDir project(':common').file('src/main/resources')
-
 def publishLoader = project.projectDir.name.tokenize('-').first()
-def publishMinecraftVersion = [
-        forge    : providers.gradleProperty('forge_minecraft_version'),
-        fabric   : providers.gradleProperty('fabric_minecraft_version'),
-        neoforge : providers.gradleProperty('neoforge_121_minecraft_version')
-                .orElse(providers.gradleProperty('neoforge_261_minecraft_version'))
-][publishLoader]
+def targetProperties = new Properties()
+file('gradle.properties').withInputStream { targetProperties.load(it) }
+def minecraftVersionKeys = targetProperties.stringPropertyNames().findAll {
+    it.startsWith("${publishLoader}_") && it.endsWith('_minecraft_version')
+}
+if (minecraftVersionKeys.size() != 1) {
+    throw new GradleException("Expected exactly one ${publishLoader}_*_minecraft_version property in ${projectDir}/gradle.properties; found ${minecraftVersionKeys}.")
+}
+def publishMinecraftVersion = providers.gradleProperty(minecraftVersionKeys.first())
 
-def publishFile = tasks.findByName('remapJar') != null ?
-        tasks.named('remapJar').flatMap { it.archiveFile } :
-        tasks.named('jar', Jar).flatMap { it.archiveFile }
+def publishArtifactTask = tasks.findByName('remapJar') != null ?
+        tasks.named('remapJar') :
+        (tasks.findByName('reobfJar') != null ? tasks.named('reobfJar') : tasks.named('jar', Jar))
+def publishFile = publishArtifactTask.flatMap { it.archiveFile }
 def curseforgeProjectId = providers.provider { findProperty('publish_curseforge_project_id')?.toString() }
         .orElse(providers.environmentVariable('CURSEFORGE_PROJECT_ID'))
 def modrinthProjectId = providers.provider { findProperty('publish_modrinth_project_id')?.toString() }
@@ -61,6 +53,19 @@ tasks.named('publishMods').configure {
 
         if (!missing.isEmpty()) {
             throw new GradleException("Cannot publish mods; missing: ${missing.join(', ')}")
+        }
+    }
+}
+
+// Legacy Forge's jar task produces the development-mapped jar first and
+// reobfJar rewrites it for production. Make every publishing task wait for the
+// target-specific production artifact verification instead of relying on a
+// jar finalizer's execution order.
+if (tasks.findByName('verifyReobfuscatedJar') != null) {
+    def productionJarVerification = tasks.named('verifyReobfuscatedJar')
+    tasks.configureEach { task ->
+        if (task.name.startsWith('publish')) {
+            task.dependsOn productionJarVerification
         }
     }
 }

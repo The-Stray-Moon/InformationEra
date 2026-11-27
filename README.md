@@ -1,51 +1,76 @@
 # Information Era
 
-使用 `common + targets/<loader>-<minecraft-version>` 结构开发的 Minecraft 模组。
+A Minecraft mod about the Information Era.
 
-## IDEA
+- mod id：informationera
+- Java 包名 / Gradle group：cc.sighs.informationera
+- 作者：Tower of Sighs
+- 声明的许可证：All Rights Reserved
 
-直接打开任意 `targets/<loader>-<version>/` 目录。IDEA 会导入当前 target 与可编辑的 `../../common` 源码模块，只下载该 target 的加载器和 Minecraft 依赖。
+## 项目状态
 
-## Target
+Information Era 将玩家库存组织成文件与文件夹。资源管理器、存储卡及游戏内存取目前主要实现在 NeoForge 1.21.1；其他 target 是开发入口，不代表功能已移植。详见[产品设计](docs/PRODUCT_DESIGN.md)。
 
-| Target | JDK | 构建命令 |
-| --- | --- | --- |
-| `forge-1.20.1` | JDK 21 | `targets\forge-1.20.1\.\gradlew.bat clean build` |
-| `fabric-1.20.1` | JDK 21 | `targets\fabric-1.20.1\.\gradlew.bat clean build` |
-| `neoforge-1.21.1` | JDK 21 | `targets\neoforge-1.21.1\.\gradlew.bat clean build` |
-| `neoforge-26.1` | JDK 25 | `targets\neoforge-26.1\.\gradlew.bat clean build` |
+构建框架基线：[SighsTemple `73d8e5e`](https://github.com/Tower-of-Sighs/SighsTemple/commit/73d8e5e68694cb7a5c3a1f5ef6208176b4f36ffc)。
 
-根项目默认只同步 `common`。使用 JDK 21 时可选择性构建前三个 target：
+以下矩阵在初始化时从实际 target 目录及 `ci.properties` 生成。CI 启用仅表示会参与验证，不等于已验证支持；后续增删版本或改变工具链时同步维护本表。
+
+| Target | Gradle JVM | CI 配置 | 项目验证状态 |
+| --- | --- | --- | --- |
+| fabric-1.20.1 | JDK 17 | true | 构建与共享测试通过；游戏内待验证 |
+| fabric-1.21.1 | JDK 21 | true | 构建与共享测试通过；游戏内待验证 |
+| fabric-26.1 | JDK 25 | true | 构建与共享测试通过；游戏内待验证 |
+| forge-1.18.2 | JDK 21 | true | 构建与共享测试通过；游戏内待验证 |
+| forge-1.19.2 | JDK 21 | true | 构建与共享测试通过；游戏内待验证 |
+| forge-1.20.1 | JDK 21 | true | 构建与共享测试通过；游戏内待验证 |
+| neoforge-1.21.1 | JDK 21 | true | 构建与共享测试通过；游戏内待验证 |
+| neoforge-26.1 | JDK 25 | true | 构建与共享测试通过；游戏内待验证 |
+
+## 开发与构建
+
+开发规范见 [AGENTS.md](AGENTS.md)。共享业务与资源位于 `common/`；loader / Minecraft 差异位于 `targets/<loader>-<version>/`。所有 target 直接编译 common 原源码，不引用共享 jar，也不等待复制到 build 目录。
+
+- 单版本：IDEA 打开对应 target 目录，使用该目录的 wrapper 和矩阵声明的 JDK。
+- 全版本：IDEA 打开 `idea-workspace/`；当前主版本为 **neoforge-1.21.1**，配置的 Gradle JVM 为 **JDK 21**。该值来自 target 描述文件，仍须核对工作区 wrapper 与所用 JDK 的兼容性。
+- 工作区只完整导入主 target。其他版本、文档、脚本及根配置作为仓库浏览内容展示，不承诺非主版本的 API 补全。common 源码只归属主 target，不额外关联根工程、common 或其他完整 target。
+- 切换主版本修改 `idea-workspace/gradle.properties` 的 `workspace_main_target` 后重新加载 Gradle。composite build 共用工作区的 Gradle/JVM，不使用被包含 target 的 wrapper；若不兼容，独立打开 target 或调整工作区工具链。
+- 普通 common 内容修改无需运行源码同步任务；变更 Gradle 配置或 `commonJava` 排除规则后需重新加载 Gradle。
+
+在所选 target 目录执行：
 
 ```powershell
-.\gradlew.bat '-Ptarget=forge-1.20.1' build
-.\gradlew.bat '-Ptarget=fabric-1.20.1' build
-.\gradlew.bat '-Ptarget=neoforge-1.21.1' build
-.\gradlew.bat -PallTargets=true build
+.\gradlew.bat clean build
+.\gradlew.bat verifyHotDebug
+.\gradlew.bat runClient
+# 或 runServer；Minecraft EULA 必须由用户阅读并接受
 ```
 
-`neoforge-26.1` 因 JDK 25 要求独立构建。
+在仓库根可执行 `./gradlew -p common build` 单独检查共享层，但不能替代目标矩阵验证。根 `-Ptarget=<目录名> build` 调用该 target 的独立 wrapper；`-PallTargets=true build` 自动选择已启用且 `ci.java` 不高于当前 Gradle JVM 的目标，并打印跳过项。最低 JDK 筛选不保证旧 wrapper 支持任意新版 JDK，必要时分别构建。根 `build` 默认只验证 common。
 
-## 结构
+## AutoJS 热调试与热执行
 
-- `common/`: 不依赖 Minecraft 或任意 loader 的共享 Java 代码。
-- `targets/*`: loader 和版本专属入口、metadata、资源及 API 适配。
+运行时调试必须使用 AutoJS，不得仅凭源码推断、临时日志或构建成功宣称游戏行为正确。
 
-## 共享资源
+每个 target 的 `debug_*` 属性声明来自 Sighs Maven 的 AutoJS、Rhino 及可用的 KubeJS。具体版本和模式以该 target 配置为准；没有 `debug_kubejs` 时仅用 Rhino，不假设存在 KubeJS 事件或 `kubejs_log`。调试依赖仅用于开发游戏运行，不嵌入发布 jar，不成为玩家端必需依赖。
 
-将所有加载器和版本共用的资源放在 `common/src/main/resources/`。构建任意 target 时，该目录会与 target 自己的 `src/main/resources/` 合并并写入最终 jar。
+1. 使用相应 JDK 执行 `verifyHotDebug`，再启动 target 的游戏实例。
+2. 默认 `GET http://127.0.0.1:25585/health` 探活，通过 MCP 客户端连接 `http://127.0.0.1:25585/mcp`，先调用 `status` 确认 side 和引擎模式。
+3. 用 `eval_js` 执行短脚本，例如 server side 的 `AutoJS.snapshot()`；检查 `isError`、`ok`、`diagnostics`，触发行为后回读状态并形成断言。界面和输入用 client，权威世界修改用 server。
+4. 修改脚本用 `reload_scripts`；KubeJS 模式结合 `kubejs_log` 检查错误，Rhino 模式重建作用域后重新注入验证脚本。配方、标签等按需另做 `/reload`。
+5. Java、Mixin 和启动期注册内容不能靠脚本热重载替换，需构建重启后再用 AutoJS 验证。
 
-加载器 metadata 仍必须保留在 target 中：Fabric 使用 `fabric.mod.json`，Forge 使用 `META-INF/mods.toml`，NeoForge 使用 `META-INF/neoforge.mods.toml`。
+配置位于游戏目录 `config/autojs.json`；多实例用 `AUTOJS_PORT` 分配不同端口。端点默认可执行任意 Java，只用于本机开发，不得暴露公网或玩家生产环境。共享机器配置 token，请求带 `Authorization: Bearer <token>`，不提交凭据。完整操作手册可从 AutoJS 发布 jar 提取 `SKILL.md`。仓库或端点不可用时明确记录阻塞，不用本地替代 jar 冒充远端验证。
 
-## 本地依赖
+## 发布与维护
 
-每个 target 都会自动将自身 `libs/` 目录中的 `*.jar` 作为 `implementation` 依赖。将 jar 放入对应目录后不需要在 `build.gradle` 中逐条声明；`*-sources.jar` 和 `*-javadoc.jar` 会被忽略。
+- curseforge: project ID not configured in root gradle.properties; environment overrides and credentials remain unverified.
+- modrinth: project ID not configured in root gradle.properties; environment overrides and credentials remain unverified.
 
-```text
-targets/forge-1.20.1/libs/
-targets/fabric-1.20.1/libs/
-targets/neoforge-1.21.1/libs/
-targets/neoforge-26.1/libs/
-```
+发布前验证承诺支持的每个 target：构建、检查 jar 的 metadata/共享类/资源、使用 AutoJS 做最小 client 和 dedicated server 行为验证，并记录实际范围。初始化没有运行这些验证，不得把上表的待验证状态当作兼容性承诺。
 
-本地 jar 的传递依赖无法自动推导。若某个 jar 还依赖其他库，需要将这些库也放入同一个 `libs/` 目录，或按常规方式声明依赖。
+- [发布指南](docs/PUBLISHING.md)
+- [维护流程](docs/MAINTENANCE_WORKFLOW.md)
+- [自动发现与新增 target](docs/CI_TARGET_DISCOVERY.md)
+- [版本迁移参考](docs/version-differences/README.md)
+
+工程来源：[开发框架](https://github.com/Tower-of-Sighs/SighsTemple)。本 README 与 AGENTS.md 已转为项目文档，后续由项目维护者更新，不再运行初始化脚本覆盖。

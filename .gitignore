@@ -1,3 +1,9 @@
+/.tmp/
+/.codex_tmp/
+**/dev-libs/
+runs/
+.env
+
 # ---- Gradle ----
 .gradle/
 build/
