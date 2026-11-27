@@ -59,7 +59,7 @@ repositories {
 }
 
 dependencies {
-    implementation "com.sighs:ApricityUI-neoforge-1.21.1:1.2.9"
+    implementation "com.sighs:ApricityUI-neoforge-1.21.1:1.3.2"
     implementation project(':common')
     // Curios：物品要做成饰品、服务端要判断「是否装备」，都需要它的 API。
     // 按官方推荐拆开——编译只拿 API，运行期才需要本体（开发环境靠 runtimeOnly 带上）。

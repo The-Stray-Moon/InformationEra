@@ -357,6 +357,11 @@ public final class FileExplorerWindow {
         return dragSource != null && dragRight && dragActive;
     }
 
+    /** 文件拖拽是否已经真正开始（越过起拖阈值）。拖拽期间不显示物品提示框。 */
+    public static boolean isFileDragActive() {
+        return dragSource != null && dragActive;
+    }
+
     /** 右键拖拽释放后短暂抑制一次 contextmenu，避免普通右键菜单覆盖 drop 菜单。 */
     public static boolean consumeContextMenuSuppression() {
         boolean value = suppressNextContextMenu;

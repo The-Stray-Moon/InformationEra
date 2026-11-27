@@ -2187,6 +2187,7 @@ public final class FileExplorerController {
         if (entry == null) {
             return;
         }
+        hideTooltip();
         if (!selected.contains(entry)) {
             selected.clear();
             selected.add(entry);
@@ -3991,44 +3992,6 @@ public final class FileExplorerController {
         }
     }
 
-    /** 通配符匹配：支持 *（任意串）和 ?（单字符），大小写不敏感。 */
-    private static boolean matchesQuery(String lowerName, String query) {
-        if (query.isEmpty()) {
-            return true;
-        }
-        if (query.indexOf('*') < 0 && query.indexOf('?') < 0) {
-            return lowerName.contains(query);
-        }
-        return wildcardMatch(lowerName, query);
-    }
-
-    private static boolean wildcardMatch(String text, String pattern) {
-        int ti = 0;
-        int pi = 0;
-        int star = -1;
-        int mark = -1;
-        while (ti < text.length()) {
-            if (pi < pattern.length() && (pattern.charAt(pi) == '?' || pattern.charAt(pi) == text.charAt(ti))) {
-                ti++;
-                pi++;
-            } else if (pi < pattern.length() && pattern.charAt(pi) == '*') {
-                star = pi;
-                mark = ti;
-                pi++;
-            } else if (star != -1) {
-                pi = star + 1;
-                mark++;
-                ti = mark;
-            } else {
-                return false;
-            }
-        }
-        while (pi < pattern.length() && pattern.charAt(pi) == '*') {
-            pi++;
-        }
-        return pi == pattern.length();
-    }
-
     /** 递归收集当前文件夹子树内匹配 query 的文件（含所在文件夹 key）。 */
     private void collectRecursiveMatches(String folderKey, String query, int depth,
                                          List<VirtualFileSystem.Entry> files, List<String> fileFolders) {
@@ -4042,7 +4005,7 @@ public final class FileExplorerController {
         for (VirtualFileSystem.Entry entry : folder.entries) {
             if (entry.folder && entry.childKey != null) {
                 collectRecursiveMatches(entry.childKey, query, depth + 1, files, fileFolders);
-            } else if (matchesQuery(entry.name.toLowerCase(), query)) {
+            } else if (ExplorerSearch.matches(entry.name, query)) {
                 files.add(entry);
                 fileFolders.add(folderKey);
             }
@@ -4051,7 +4014,7 @@ public final class FileExplorerController {
 
     /** 在子文件夹中搜索：若有匹配则导航到第一个匹配项所在文件夹并选中它。 */
     private void searchSubfolders() {
-        String query = searchQuery == null ? "" : searchQuery.trim().toLowerCase();
+        String query = searchQuery == null ? "" : searchQuery.trim();
         if (query.isEmpty()) {
             return;
         }
@@ -4078,9 +4041,9 @@ public final class FileExplorerController {
         if (folder == null) {
             return entries;
         }
-        String query = searchQuery == null ? "" : searchQuery.trim().toLowerCase();
+        String query = searchQuery == null ? "" : searchQuery.trim();
         for (VirtualFileSystem.Entry entry : folder.entries) {
-            if (query.isEmpty() || matchesQuery(entry.name.toLowerCase(), query)) {
+            if (query.isEmpty() || ExplorerSearch.matches(entry.name, query)) {
                 entries.add(entry);
             }
         }
@@ -4759,7 +4722,7 @@ public final class FileExplorerController {
             });
             item.addEventListener("mouseover", e -> {
                 if (e instanceof MouseEvent me) {
-                    showTooltip(entryFor(item), me.clientX, me.clientY);
+                    showTooltip(item, entryFor(item), me.clientX, me.clientY);
                 }
             });
             item.addEventListener("mousemove", e -> {
@@ -4951,10 +4914,26 @@ public final class FileExplorerController {
 
     // ---------- 悬停元数据 ----------
 
-    private void showTooltip(VirtualFileSystem.Entry entry, double x, double y) {
+    /**
+     * 条目悬停提示。
+     *
+     * <p>物品文件显示原版物品提示框（由 {@link ExplorerItemTooltip} 在渲染阶段绘制），
+     * 这样物品组件、模组追加行、耐久等信息与物品栏里完全一致；文件夹、取不到物品栈的
+     * 条目（例如物品所属模组已被卸载）仍回退到窗口内的文本提示。
+     */
+    private void showTooltip(Element row, VirtualFileSystem.Entry entry, double x, double y) {
         if (entry == null || tooltip == null) {
             return;
         }
+        if (!entry.folder) {
+            ItemStack stack = stackForEntry(entry);
+            if (!stack.isEmpty()) {
+                hideDomTooltip();
+                ExplorerItemTooltip.show(document, row, stack);
+                return;
+            }
+        }
+        ExplorerItemTooltip.hide(document);
         tooltip.setTextContent(metadataText(entry));
         moveTooltip(x, y);
         tooltip.setInlineStyleProperty("display", "block");
@@ -5002,6 +4981,12 @@ public final class FileExplorerController {
     }
 
     private void hideTooltip() {
+        ExplorerItemTooltip.hide(document);
+        hideDomTooltip();
+    }
+
+    /** 只收起窗口内的文本提示；物品的原版提示框由 {@link #hideTooltip()} 一并收起。 */
+    private void hideDomTooltip() {
         tooltipVisible = false;
         if (tooltip != null) {
             tooltip.setInlineStyleProperty("display", "none");
@@ -5014,8 +4999,11 @@ public final class FileExplorerController {
      * <p>只靠条目的 {@code mouseout} 是不够的：鼠标划过时条目会被整体重渲染、鼠标也可能
      * 直接移到窗口外或界面上没有条目的区域，这些情况都不会触发 {@code mouseout}，
      * 提示框就会永久留在屏幕上。这里按「鼠标下是否真的还有一个条目」来兜底。
+     *
+     * <p>物品的原版提示框不在 DOM 里，单独走一遍校验。
      */
     void tickTooltip() {
+        ExplorerItemTooltip.tick(document);
         if (!tooltipVisible || tooltip == null || document == null || !document.isActive()) {
             return;
         }
@@ -5066,6 +5054,7 @@ public final class FileExplorerController {
         if (tooltip == null) {
             return;
         }
+        ExplorerItemTooltip.hide(document);
         tooltip.setTextContent(text);
         Element.DOMRect rect = button.getBoundingClientRect();
         tooltip.setInlineStyleProperty("left", px(rect.left));
