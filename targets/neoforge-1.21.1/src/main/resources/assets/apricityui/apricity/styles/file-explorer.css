@@ -1104,6 +1104,15 @@
     white-space: nowrap;
 }
 
+.fe-content.fe-view-slots .fe-grid {
+    grid-template-columns: repeat(auto-fill, 44px);
+    gap: 0;
+    padding: 0;
+}
+.fe-content.fe-view-slots .slot { box-sizing: border-box; position: relative; }
+.fe-content.fe-view-slots .slot.selected { outline: 2px solid var(--ore-blue); outline-offset: -2px; }
+.fe-content.fe-view-slots .fe-name { display: none; }
+
 /* ---------- 平铺视图 ---------- */
 .fe-tiles {
     display: grid;

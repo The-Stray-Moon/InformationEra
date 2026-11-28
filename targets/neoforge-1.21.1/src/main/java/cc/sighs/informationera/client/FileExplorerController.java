@@ -2466,6 +2466,7 @@ public final class FileExplorerController {
         entries.add(CtxEntry.actionChecked(t("informationera.fe.large"), "large".equals(viewMode), () -> setViewMode("large")));
         entries.add(CtxEntry.actionChecked(t("informationera.fe.medium"), "medium".equals(viewMode), () -> setViewMode("medium")));
         entries.add(CtxEntry.actionChecked(t("informationera.fe.small"), "small".equals(viewMode), () -> setViewMode("small")));
+        entries.add(CtxEntry.actionChecked(t("informationera.fe.slots"), "slots".equals(viewMode), () -> setViewMode("slots")));
         entries.add(CtxEntry.separator());
         entries.add(CtxEntry.actionChecked(t("informationera.fe.list"), "list".equals(viewMode), () -> setViewMode("list")));
         entries.add(CtxEntry.actionChecked(t("informationera.fe.details"), "details".equals(viewMode), () -> setViewMode("details")));
@@ -3343,6 +3344,7 @@ public final class FileExplorerController {
 
     private int iconSizeFor(String mode) {
         return switch (mode) {
+            case "slots" -> 32;
             case "small" -> 40;
             case "medium" -> 64;
             case "large" -> 96;
@@ -3375,7 +3377,7 @@ public final class FileExplorerController {
         // Windows 资源管理器 Ctrl+滚轮顺序（从大到小）：
         // 超大图标 -> 大图标 -> 中等图标 -> 小图标 -> 列表 -> 详细信息 -> 内容 -> 平铺。
         // 向上滚（deltaY<0）变"小一档"，向下滚变"大一档"，两端截断，不循环。
-        List<String> modes = List.of("xlarge", "large", "medium", "small", "list", "details", "content", "tiles");
+        List<String> modes = List.of("xlarge", "large", "medium", "small", "slots", "list", "details", "content", "tiles");
         int idx = modes.indexOf(viewMode);
         if (idx < 0) {
             idx = 3;
@@ -3956,8 +3958,8 @@ public final class FileExplorerController {
         // 否则鼠标划过时留在屏幕上的提示框会永久卡住。
         hideTooltip();
         // 视图模式类：控制图标网格的列宽与图标尺寸，切换布局而不是单纯缩放。
-        content.getClassList().remove("fe-view-small", "fe-view-medium", "fe-view-large", "fe-view-xlarge");
-        if ("small".equals(viewMode) || "medium".equals(viewMode) || "large".equals(viewMode) || "xlarge".equals(viewMode)) {
+        content.getClassList().remove("fe-view-slots", "fe-view-small", "fe-view-medium", "fe-view-large", "fe-view-xlarge");
+        if ("slots".equals(viewMode) || "small".equals(viewMode) || "medium".equals(viewMode) || "large".equals(viewMode) || "xlarge".equals(viewMode)) {
             content.getClassList().add("fe-view-" + viewMode);
         }
         List<VirtualFileSystem.Entry> entries = topLevelEntries();
@@ -4184,7 +4186,7 @@ public final class FileExplorerController {
         }
         // 可视范围内的条目。
         sb.append("<div class=\"fe-vgrid-row\" style=\"display:grid;grid-template-columns:repeat(")
-          .append(cols).append(",1fr);gap:4px;\">");
+          .append(cols).append("slots".equals(viewMode) ? ",44px);gap:0;\">" : ",1fr);gap:4px;\">");
         for (int i = startIdx; i < endIdx; i++) {
             VRow row = rows.get(i);
             if (row.entry() == null) {
@@ -4207,6 +4209,9 @@ public final class FileExplorerController {
         }
         Element.DOMRect rect = content.getBoundingClientRect();
         double width = rect != null && rect.width > 0 ? rect.width : 980;
+        if ("slots".equals(viewMode)) {
+            return Math.max(1, (int) Math.floor(content.getClientWidth() / 44.0));
+        }
         if (tiles) {
             // 与 CSS 里 .fe-view-* .fe-tiles 的 minmax 保持一致，否则虚拟滚动的列数会算错。
             double tileColWidth = switch (viewMode) {
@@ -4230,6 +4235,7 @@ public final class FileExplorerController {
 
     private double gridRowHeight() {
         return switch (viewMode) {
+            case "slots" -> 44;
             case "small" -> 84;
             case "medium" -> 112;
             case "large" -> 148;
@@ -5204,7 +5210,8 @@ public final class FileExplorerController {
     private String gridItemHtml(VirtualFileSystem.Entry entry) {
         int index = renderedEntryList.indexOf(entry);
         StringBuilder sb = new StringBuilder();
-        sb.append("<div class=\"fe-item fe-grid-item\" data-id=\"e").append(index).append("\"")
+        sb.append("<div class=\"fe-item ").append("slots".equals(viewMode) ? "slot" : "fe-grid-item")
+          .append("\" data-id=\"e").append(index).append("\"")
           .append(" data-folder=\"").append(entry.folder ? "1" : "0").append("\"")
           .append(folderPathAttr(entry)).append(">");
         if (checkboxes) {

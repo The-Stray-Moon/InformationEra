@@ -55,7 +55,7 @@ public final class ExplorerViewState {
     public static final String BUILT_IN_SORT_FIELD = BUILT_IN_COLUMN_IDS[0];
 
     private static final List<String> VIEW_MODES =
-            List.of("details", "content", "list", "tiles", "small", "medium", "large", "xlarge");
+            List.of("details", "content", "list", "tiles", "slots", "small", "medium", "large", "xlarge");
     private static final List<String> GROUP_FIELDS =
             List.of("name", "modified", "created", "type", "size", "author");
     private static final double MIN_COLUMN_WIDTH = 48.0;
