@@ -22,12 +22,15 @@ import static cc.sighs.informationera.client.FileExplorerText.t;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Deque;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.Set;
 import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 
 /**
  * 文件资源管理器窗口的全部交互逻辑：
@@ -38,8 +41,6 @@ public final class FileExplorerController {
 
     private static final double DEFAULT_WIDTH = 980;
     private static final double DEFAULT_HEIGHT = 600;
-    private static final double MIN_WIDTH = 480;
-    private static final double MIN_HEIGHT = 320;
     private static final double TITLEBAR_HEIGHT = 40;
     private static final double MENU_WIDTH = 230;
     /** 线性视图（details/list/content）每行高度，用于虚拟滚动窗口计算。 */
@@ -59,7 +60,7 @@ public final class FileExplorerController {
      */
     private static final double RENAME_MIN_HEIGHT = 28.0;
 
-    private static final String[] COL_FIELDS = {"name", "modified", "type", "size", "created", "author"};
+    private static final String[] COL_FIELDS = ExplorerViewState.COLUMN_FIELDS;
 
     private static String[] columnLabels() {
         return new String[]{t("informationera.fe.name"), t("informationera.fe.modified"),
@@ -111,14 +112,16 @@ public final class FileExplorerController {
     private double windowY;
     private double windowWidth = DEFAULT_WIDTH;
     private double windowHeight = DEFAULT_HEIGHT;
-    private boolean minimized = false;
-    private boolean maximized = false;
-    private double restoreX;
-    private double restoreY;
-    private double restoreW;
-    private double restoreH;
+    private final ExplorerWindowMode mode = new ExplorerWindowMode();
 
     private String currentKey = DiskFolder.HOST_ID;
+    /**
+     * 本窗口上一次套用视图时使用的磁盘身份（储存卡 uuid）。
+     *
+     * <p>设备状态到达/换卡后，{@link #onViewReplaced} 会用它检测磁盘是否变了：变了就重新
+     * 读取当前文件夹在新磁盘上的视图，而不是沿用上一张卡的布局。
+     */
+    private String lastDiskIdentity;
     private final Set<VirtualFileSystem.Entry> selected = new HashSet<>();
     private final Set<VirtualFileSystem.Entry> checkedSet = new HashSet<>();
     private int lastCheckedIndex = -1;
@@ -160,6 +163,8 @@ public final class FileExplorerController {
 
     private String interaction = "none";
     private String resizeHandle = "";
+    /** 本次按下-松开之间是否真的移动过：单纯点击不应改写窗口持久化。 */
+    private boolean interactionMoved;
     private double startMouseX;
     private double startMouseY;
     private double startWinX;
@@ -226,7 +231,7 @@ public final class FileExplorerController {
     }
 
     boolean isMinimized() {
-        return minimized;
+        return mode.isMinimized();
     }
 
     String currentKey() {
@@ -241,7 +246,7 @@ public final class FileExplorerController {
     /** 供任务栏逻辑调用：最小化/恢复，返回操作后的最小化状态。 */
     boolean toggleMinimizeForTaskbar() {
         toggleMinimize();
-        return minimized;
+        return mode.isMinimized();
     }
 
     /** 供任务栏跳转列表等外部入口使用，直接导航到 key。 */
@@ -256,11 +261,39 @@ public final class FileExplorerController {
     public void closeWindow() {
         hideTooltip();
         closeContextMenu();
+        // 只有“最近一次被玩家亲手调整过几何”的窗口才有资格改写持久化记录：
+        // 关掉一个没动过的旧窗口不能把玩家刚调好的位置覆盖回去。
+        if (FileExplorerWindow.isGeometryOwner(this)) {
+            rememberWindowFrame();
+        }
         FileExplorerWindow.unregister(this);
         if (document != null) {
             document.remove();
             document = null;
         }
+        // 窗口已经收掉之后再落盘：即使配置写入失败，也不会留下半关的窗口。
+        ExplorerPreferences.flush();
+    }
+
+    /** 玩家主动调整了窗口几何（拖动/缩放/最大化/从最大化拖出）：登记所有权并立即落盘。 */
+    private void commitGeometry() {
+        FileExplorerWindow.markGeometryOwner(this);
+        rememberWindowFrame();
+    }
+
+    /** 当前可见矩形。 */
+    private ExplorerWindowGeometry.Frame visibleFrame() {
+        return new ExplorerWindowGeometry.Frame(windowX, windowY, windowWidth, windowHeight);
+    }
+
+    /** 把当前窗口的正常矩形与最大化状态写进窗口持久化（不写标签页/目录等会话状态）。 */
+    private void rememberWindowFrame() {
+        if (document == null) {
+            return;
+        }
+        boolean maximized = mode.isMaximized();
+        ExplorerWindowGeometry.Frame normal = mode.normalFrame(visibleFrame());
+        ExplorerWindowState.remember(ExplorerWindowGeometry.fit(normal, document.getViewportSize()), maximized);
     }
 
     /** 把窗口挂到 Overlay Document 上。 */
@@ -275,6 +308,10 @@ public final class FileExplorerController {
         tabs.clear();
         tabs.add(new Tab());
         activeTab = 0;
+        // 先恢复全局显示习惯与当前文件夹的视图，后面的渲染才有正确的初始值。
+        applyDisplayState(ExplorerPreferences.display());
+        applyViewState(ExplorerPreferences.viewState(currentKey), false);
+        lastDiskIdentity = ExplorerPreferences.diskIdentity();
 
         initWindowGeometry();
         bindStatic();
@@ -302,13 +339,29 @@ public final class FileExplorerController {
 
     private void initWindowGeometry() {
         Size viewport = document.getViewportSize();
-        double vw = Math.max(MIN_WIDTH, viewport.width());
-        double vh = Math.max(MIN_HEIGHT, viewport.height());
-        windowWidth = Math.min(DEFAULT_WIDTH, vw);
-        windowHeight = Math.min(DEFAULT_HEIGHT, vh);
-        windowX = (vw - windowWidth) / 2;
-        windowY = (vh - windowHeight) / 2;
+        // 恢复上次关闭时的位置/尺寸；同一会话再开窗口时层叠错开，避免完全重叠。
+        ExplorerWindowGeometry.Frame saved = ExplorerWindowState.frame();
+        ExplorerWindowGeometry.Frame normal = saved == null
+                ? ExplorerWindowGeometry.initialFrame(viewport, FileExplorerWindow.windowCount())
+                : ExplorerWindowGeometry.cascade(ExplorerWindowGeometry.fit(saved, viewport),
+                        viewport, FileExplorerWindow.windowCount());
+        if (ExplorerWindowState.maximized()) {
+            // 上次是最大化关闭：先记住普通还原矩形，再按当前视口铺满。
+            mode.startMaximized(normal);
+            applyFrame(ExplorerWindowGeometry.maximizedFrame(viewport));
+        } else {
+            applyFrame(normal);
+        }
         applyWindowGeometry();
+        updateMaximizeControl();
+    }
+
+    /** 把矩形写进窗口字段（只改状态，DOM 由 {@link #applyWindowGeometry()} 统一写入）。 */
+    private void applyFrame(ExplorerWindowGeometry.Frame frame) {
+        windowX = frame.x();
+        windowY = frame.y();
+        windowWidth = frame.width();
+        windowHeight = frame.height();
     }
 
     private void applyWindowGeometry() {
@@ -319,6 +372,27 @@ public final class FileExplorerController {
         window.setInlineStyleProperty("top", px(windowY));
         window.setInlineStyleProperty("width", px(windowWidth));
         window.setInlineStyleProperty("height", px(windowHeight));
+    }
+
+    /**
+     * 视口变化（游戏窗口尺寸/宽高比、分辨率、GUI 缩放、页面缩放）后重新贴合。
+     *
+     * <p>最大化窗口始终铺满新视口；正常窗口只缩不放，并整体夹回视口内，
+     * 避免右下角和状态栏跑到看不见的地方。
+     */
+    void adaptToViewport() {
+        if (document == null || window == null) {
+            return;
+        }
+        Size viewport = document.getViewportSize();
+        ExplorerWindowGeometry.Frame target = mode.adapt(visibleFrame(), viewport);
+        if (Math.abs(target.x() - windowX) < 0.01 && Math.abs(target.y() - windowY) < 0.01
+                && Math.abs(target.width() - windowWidth) < 0.01
+                && Math.abs(target.height() - windowHeight) < 0.01) {
+            return;
+        }
+        applyFrame(target);
+        applyWindowGeometry();
     }
 
     /** 把 HTML 里静态命令栏文案替换为当前语言。 */
@@ -409,7 +483,7 @@ public final class FileExplorerController {
         bindMenuButton("fe-layout", this::showLayoutMenu);
 
         bindButtonHint("fe-min", t("informationera.fe.min"));
-        bindButtonHint("fe-max", t("informationera.fe.max"));
+        bindButtonHint("fe-max", this::maximizeHint);
         bindButtonHint("fe-close", t("informationera.fe.close"));
         bindButtonHint("fe-back", t("informationera.fe.back"));
         bindButtonHint("fe-forward", t("informationera.fe.forward"));
@@ -1406,6 +1480,8 @@ public final class FileExplorerController {
     }
 
     private void renderAllAfterTabChange() {
+        // 标签页恢复的字段只是缓存，最终以「身份 + 当前文件夹」的设置为准。
+        applyViewState(ExplorerPreferences.viewState(currentKey), false);
         renderTabs();
         renderNavigation();
         renderContent();
@@ -1494,7 +1570,10 @@ public final class FileExplorerController {
     // ---------- 窗口拖拽 / 缩放 / 框选 ----------
 
     private void beginDrag(double mouseX, double mouseY) {
+        // 最大化窗口在鼠标真正移动后才还原（见 onInteractionMove）：单纯点击标题栏
+        // 不应该退出最大化。
         interaction = "drag";
+        interactionMoved = false;
         startMouseX = mouseX;
         startMouseY = mouseY;
         startWinX = windowX;
@@ -1504,6 +1583,7 @@ public final class FileExplorerController {
 
     private void beginResize(String handle, double mouseX, double mouseY) {
         interaction = "resize";
+        interactionMoved = false;
         resizeHandle = handle;
         startMouseX = mouseX;
         startMouseY = mouseY;
@@ -1546,9 +1626,14 @@ public final class FileExplorerController {
         if (resizeColIndex < 0 || resizeColIndex >= columnWidths.size()) {
             return;
         }
+        int col = resizeColIndex;
         double dx = mouseX - colResizeStartX;
         double newWidth = Math.max(48.0, colResizeStartWidth + dx);
-        columnWidths.set(resizeColIndex, newWidth);
+        columnWidths.set(col, newWidth);
+        // 先读存储里的最新视图再只改这一列，避免另一个窗口同时改了排序/分组时被本地快照覆盖。
+        ExplorerViewState updated = ExplorerPreferences.updateView(currentKey,
+                state -> state.columnWidths[col] = newWidth);
+        applyViewState(updated, false);
         renderContent();
     }
 
@@ -1578,11 +1663,48 @@ public final class FileExplorerController {
     private void onInteractionMove(MouseEvent me) {
         switch (interaction) {
             case "drag" -> {
-                windowX = startWinX + (me.clientX - startMouseX);
-                windowY = startWinY + (me.clientY - startMouseY);
+                if (mode.isMaximized()) {
+                    // 和 Windows 一样：最大化窗口在指针真正拖动后才还原，
+                    // 单纯点击标题栏保持最大化。还原后把拖拽基准移到当前指针，
+                    // 避免窗口先跳一下再被同一段位移拖走两次。
+                    double movedX = me.clientX - startMouseX;
+                    double movedY = me.clientY - startMouseY;
+                    if (movedX * movedX + movedY * movedY <= 9) {
+                        return;
+                    }
+                    Size viewport = document.getViewportSize();
+                    ExplorerWindowGeometry.Frame normal = mode.unmaximize(visibleFrame(), viewport);
+                    double viewportWidth = Math.max(1, viewport.width());
+                    double anchorX = me.clientX - (me.clientX / viewportWidth) * normal.width();
+                    double anchorY = Math.max(0, me.clientY - TITLEBAR_HEIGHT / 2);
+                    applyFrame(ExplorerWindowGeometry.fit(
+                            new ExplorerWindowGeometry.Frame(anchorX, anchorY, normal.width(), normal.height()),
+                            viewport));
+                    applyWindowGeometry();
+                    updateMaximizeControl();
+                    // 还原本身已经是玩家调整几何：记为所有者并落盘。
+                    interactionMoved = true;
+                    commitGeometry();
+                    startMouseX = me.clientX;
+                    startMouseY = me.clientY;
+                    startWinX = windowX;
+                    startWinY = windowY;
+                    return;
+                }
+                // 拖动时整体夹回视口：窗口不会只露出一个抓不到的边。
+                applyFrame(ExplorerWindowGeometry.fit(
+                        new ExplorerWindowGeometry.Frame(startWinX + (me.clientX - startMouseX),
+                                startWinY + (me.clientY - startMouseY), windowWidth, windowHeight),
+                        document.getViewportSize()));
                 applyWindowGeometry();
+                interactionMoved = true;
             }
-            case "resize" -> applyResize(me.clientX, me.clientY);
+            case "resize" -> {
+                if (!"nav".equals(resizeHandle) && !"preview".equals(resizeHandle)) {
+                    interactionMoved = true;
+                }
+                applyResize(me.clientX, me.clientY);
+            }
             case "colresize" -> applyColumnResize(me.clientX);
             case "rubber" -> updateRubber(me.clientX, me.clientY);
             default -> {
@@ -1612,23 +1734,14 @@ public final class FileExplorerController {
         switch (resizeHandle) {
             case "e" -> w = startWinW + dx;
             case "s" -> h = startWinH + dy;
-            case "w" -> {
-                x = startWinX + dx;
-                w = startWinW - dx;
-            }
-            case "n" -> {
-                y = startWinY + dy;
-                h = startWinH - dy;
-            }
+            case "w" -> w = startWinW - dx;
+            case "n" -> h = startWinH - dy;
             case "ne" -> {
-                y = startWinY + dy;
                 h = startWinH - dy;
                 w = startWinW + dx;
             }
             case "nw" -> {
-                x = startWinX + dx;
                 w = startWinW - dx;
-                y = startWinY + dy;
                 h = startWinH - dy;
             }
             case "se" -> {
@@ -1636,7 +1749,6 @@ public final class FileExplorerController {
                 h = startWinH + dy;
             }
             case "sw" -> {
-                x = startWinX + dx;
                 w = startWinW - dx;
                 h = startWinH + dy;
             }
@@ -1644,23 +1756,25 @@ public final class FileExplorerController {
             }
         }
 
-        if (w < MIN_WIDTH) {
-            if (hasWest(resizeHandle)) {
-                x = startWinX + startWinW - MIN_WIDTH;
-            }
-            w = MIN_WIDTH;
-        }
-        if (h < MIN_HEIGHT) {
-            if (hasNorth(resizeHandle)) {
-                y = startWinY + startWinH - MIN_HEIGHT;
-            }
-            h = MIN_HEIGHT;
-        }
+        // 尺寸上限：东/南边固定左上角，最多长到视口右边/下边；西/北边固定的是对边，
+        // 最多长回原来的右/下边再往左/上延伸到视口边界。位置由固定边反推，不会因为
+        // 尺寸被夹住而整体滑走。
+        Size viewport = document.getViewportSize();
+        boolean west = hasWest(resizeHandle);
+        boolean north = hasNorth(resizeHandle);
+        double rightEdge = startWinX + startWinW;
+        double bottomEdge = startWinY + startWinH;
+        double maxWidth = west ? rightEdge : viewport.width() - startWinX;
+        double maxHeight = north ? bottomEdge : viewport.height() - startWinY;
+        double minWidth = Math.min(ExplorerWindowGeometry.minWidth(viewport), Math.max(1, maxWidth));
+        double minHeight = Math.min(ExplorerWindowGeometry.minHeight(viewport), Math.max(1, maxHeight));
+        w = Math.max(minWidth, Math.min(w, Math.max(minWidth, maxWidth)));
+        h = Math.max(minHeight, Math.min(h, Math.max(minHeight, maxHeight)));
+        x = west ? rightEdge - w : startWinX;
+        y = north ? bottomEdge - h : startWinY;
 
-        windowX = x;
-        windowY = y;
-        windowWidth = w;
-        windowHeight = h;
+        applyFrame(ExplorerWindowGeometry.fit(
+                new ExplorerWindowGeometry.Frame(x, y, w, h), viewport));
         applyWindowGeometry();
     }
 
@@ -1678,9 +1792,28 @@ public final class FileExplorerController {
     }
 
     private void endInteraction() {
+        String finishedInteraction = interaction;
+        String finishedHandle = resizeHandle;
         if ("rubber".equals(interaction)) {
             finishRubber();
         }
+        // 列宽/窗格宽度在拖动过程中只改内存，松手时再合并成一次持久化修改。
+        if ("colresize".equals(finishedInteraction)) {
+            notifyOtherWindowsFolder(currentKey);
+        } else if ("resize".equals(finishedInteraction) && "nav".equals(finishedHandle)) {
+            changeDisplay(state -> state.navWidth = navWidth, false);
+        } else if ("resize".equals(finishedInteraction) && "preview".equals(finishedHandle)) {
+            changeDisplay(state -> state.previewWidth = previewWidth, false);
+        }
+        // 窗口本体拖拽/缩放确实移动过：记为几何所有者并落盘，下次开窗或重启后恢复。
+        // 只是点了一下标题栏/缩放边（没有位移）不算调整，不能改写持久化记录。
+        if (interactionMoved
+                && ("drag".equals(finishedInteraction)
+                || ("resize".equals(finishedInteraction) && !"nav".equals(finishedHandle)
+                        && !"preview".equals(finishedHandle)))) {
+            commitGeometry();
+        }
+        interactionMoved = false;
         interaction = "none";
         resizeHandle = "";
         resizeColIndex = -1;
@@ -1746,47 +1879,33 @@ public final class FileExplorerController {
     }
 
     private void toggleMinimize() {
-        if (maximized) {
-            // 最大化时点击最小化：先退出最大化，再最小化。
-            toggleMaximize();
-        }
-        if (!minimized) {
-            restoreW = windowWidth;
-            restoreH = windowHeight;
-            minimized = true;
-            // 最小化：直接隐藏整个窗口，只保留任务栏任务标。
+        if (!mode.isMinimized()) {
+            // 最小化只隐藏窗口：最大化状态和普通还原矩形都保持不动，
+            // 任务栏恢复后最大化窗口仍然最大化。
+            mode.minimize();
             hideTooltip();
             window.setInlineStyleProperty("display", "none");
         } else {
-            minimized = false;
             // 移除内联 display，恢复 CSS 定义的布局，避免残留 display 导致尺寸错乱。
             window.removeInlineStyleProperty("display");
-            windowWidth = restoreW;
-            windowHeight = restoreH;
+            // 最小化期间视口可能已经变了（窗口被拉宽/分辨率变化），恢复时按当前视口重新贴合。
+            applyFrame(mode.restoreFromMinimize(visibleFrame(), document.getViewportSize()));
             applyWindowGeometry();
         }
     }
 
     private void toggleMaximize() {
         Size viewport = document.getViewportSize();
-        if (!maximized) {
-            restoreX = windowX;
-            restoreY = windowY;
-            restoreW = windowWidth;
-            restoreH = windowHeight;
-            maximized = true;
-            windowX = 0;
-            windowY = 0;
-            windowWidth = viewport.width();
-            windowHeight = viewport.height();
+        if (!mode.isMaximized()) {
+            applyFrame(mode.maximize(visibleFrame(), viewport));
         } else {
-            maximized = false;
-            windowX = restoreX;
-            windowY = restoreY;
-            windowWidth = restoreW;
-            windowHeight = restoreH;
+            // 还原矩形也必须落在当前视口里：最大化期间视口可能已经缩小。
+            applyFrame(mode.unmaximize(visibleFrame(), viewport));
         }
         applyWindowGeometry();
+        updateMaximizeControl();
+        // 最大化/还原是玩家主动调整几何：成为几何所有者并落盘。
+        commitGeometry();
     }
 
     // ---------- 跨窗口拖拽原语（由 FileExplorerWindow 全局引擎调用） ----------
@@ -2006,6 +2125,10 @@ public final class FileExplorerController {
         if (view != null) {
             this.fs = view;
         }
+        // 设备状态到达或换了储存卡时，文件夹 id 可能和上一张卡相同，但布局必须按新磁盘取。
+        String disk = ExplorerPreferences.diskIdentity();
+        boolean diskChanged = !Objects.equals(disk, lastDiskIdentity);
+        lastDiskIdentity = disk;
         // 条目引用已整体失效，正在进行的重命名必须放弃：留着输入框再提交，
         // 用的就是指向旧视图的条目了。
         if (renamingEntry != null) {
@@ -2013,8 +2136,13 @@ public final class FileExplorerController {
         }
         // 当前所在文件夹可能在新视图里已经不存在（被删除/移动过），
         // 这时回退到根目录，避免渲染出一片空白。
+        boolean folderChanged = false;
         if (this.fs.folder(currentKey) == null) {
             currentKey = DiskFolder.ROOT_ID;
+            folderChanged = true;
+        }
+        if (diskChanged || folderChanged) {
+            applyViewState(ExplorerPreferences.viewState(currentKey), false);
         }
         selected.clear();
         checkedSet.clear();
@@ -2151,7 +2279,8 @@ public final class FileExplorerController {
     private void showWindowContextMenu(double x, double y) {
         List<CtxEntry> entries = new ArrayList<>();
         entries.add(CtxEntry.action(t("informationera.fe.new_tab"), "Ctrl+T", this::newTab));
-        entries.add(CtxEntry.action(t("informationera.fe.maximize"), this::toggleMaximize));
+        entries.add(CtxEntry.action(t(mode.isMaximized() ? "informationera.fe.restore" : "informationera.fe.maximize"),
+                this::toggleMaximize));
         entries.add(CtxEntry.separator());
         entries.add(CtxEntry.actionDanger(t("informationera.fe.close_window"), this::closeWindow));
         openContextMenu(x, y, entries);
@@ -2280,8 +2409,7 @@ public final class FileExplorerController {
     }
 
     private void toggleFoldersFirst() {
-        foldersFirst = !foldersFirst;
-        renderContent();
+        changeView(state -> state.foldersFirst = !state.foldersFirst);
     }
 
     private void showLayoutMenu(double x, double y) {
@@ -2304,7 +2432,34 @@ public final class FileExplorerController {
         entries.add(CtxEntry.separator());
         entries.add(CtxEntry.actionChecked(t("informationera.fe.checkboxes"), checkboxes, this::toggleCheckboxes));
         entries.add(CtxEntry.actionChecked(t("informationera.fe.extensions"), showExtensions, this::toggleExtensions));
+        entries.add(CtxEntry.separator());
+        entries.add(CtxEntry.action(t("informationera.fe.set_default_view"), this::setCurrentViewAsDefault));
+        entries.add(CtxEntry.action(t("informationera.fe.restore_default_view"), this::restoreCurrentViewDefault));
+        entries.add(CtxEntry.action(t("informationera.fe.reset_all_views"), this::resetAllFolderViews));
         openContextMenu(x, y, entries);
+    }
+
+    /** 把当前文件夹的布局/排序/分组/列设置记为默认，供其它没有独立设置的文件夹使用。 */
+    private void setCurrentViewAsDefault() {
+        ExplorerPreferences.setDefaultView(currentKey);
+        setStatus(t("informationera.fe.status_default_view_saved"));
+    }
+
+    /** 删除当前文件夹的独立设置，回到默认视图。 */
+    private void restoreCurrentViewDefault() {
+        ExplorerPreferences.resetFolderView(currentKey);
+        applyViewState(ExplorerPreferences.viewState(currentKey), true);
+        notifyOtherWindowsFolder(currentKey);
+        setStatus(t("informationera.fe.status_default_view_restored"));
+    }
+
+    /** 清除当前身份下所有文件夹的独立设置（默认模板本身保留）。 */
+    private void resetAllFolderViews() {
+        ExplorerPreferences.resetAllFolderViews();
+        for (FileExplorerController controller : new ArrayList<>(FileExplorerWindow.getWindows())) {
+            controller.reloadFolderViewFromPreferences();
+        }
+        setStatus(t("informationera.fe.status_views_reset"));
     }
 
     private void openContextMenu(double x, double y, List<CtxEntry> entries) {
@@ -3018,10 +3173,103 @@ public final class FileExplorerController {
      */
     // ---------- 视图 / 排序 / 布局 ----------
 
+    /** 把存储里的视图设置套用到本窗口，不写回存储。 */
+    private void applyViewState(ExplorerViewState state, boolean rerender) {
+        boolean groupChanged = !Objects.equals(groupBy, state.groupBy);
+        viewMode = state.viewMode;
+        iconSize = iconSizeFor(viewMode);
+        sortField = state.sortField;
+        sortAsc = state.sortAsc;
+        foldersFirst = state.foldersFirst;
+        groupBy = state.groupBy;
+        for (int col = 0; col < ExplorerViewState.COLUMN_COUNT; col++) {
+            columnWidths.set(col, state.columnWidths[col]);
+        }
+        System.arraycopy(state.columnVisible, 0, columnVisible, 0, ExplorerViewState.COLUMN_COUNT);
+        if (groupChanged) {
+            collapsedGroups.clear();
+        }
+        if (rerender) {
+            renderContent();
+        }
+    }
+
+    /** 把存储里的全局显示设置套用到本窗口，不写回存储。 */
+    private void applyDisplayState(ExplorerDisplayState state) {
+        showNav = state.showNav;
+        previewOpen = state.showPreview;
+        detailsPaneOpen = state.showDetails;
+        navWidth = state.navWidth;
+        previewWidth = state.previewWidth;
+        compact = state.compact;
+        checkboxes = state.checkboxes;
+        showExtensions = state.showExtensions;
+    }
+
+    /** 应用全局设置对应的界面变化；内容相关的变化才重绘内容区。 */
+    private void applyDisplayVisuals(boolean rerenderContent) {
+        applyPaneWidths();
+        applyNavVisibility();
+        applyPreviewVisibility();
+        applyDetailsPaneVisibility();
+        applyCompact();
+        updatePreview();
+        updateDetailsPane();
+        if (rerenderContent) {
+            renderContent();
+        }
+    }
+
+    /**
+     * 读存储里的最新全局设置、只改指定字段，再套用到本窗口并通知其它窗口。
+     */
+    private void changeDisplay(Consumer<ExplorerDisplayState> mutation, boolean rerenderContent) {
+        ExplorerDisplayState updated = ExplorerPreferences.updateDisplay(mutation);
+        applyDisplayState(updated);
+        applyDisplayVisuals(rerenderContent);
+        notifyOtherWindowsDisplay();
+    }
+
+    /** 读存储里的最新文件夹视图、只改指定字段，再套用并通知同文件夹的其它窗口。 */
+    private void changeView(Consumer<ExplorerViewState> mutation) {
+        ExplorerViewState updated = ExplorerPreferences.updateView(currentKey, mutation);
+        applyViewState(updated, true);
+        notifyOtherWindowsFolder(currentKey);
+    }
+
+    private void notifyOtherWindowsDisplay() {
+        for (FileExplorerController controller : new ArrayList<>(FileExplorerWindow.getWindows())) {
+            if (controller != this) {
+                controller.reloadDisplayFromPreferences();
+            }
+        }
+    }
+
+    private void notifyOtherWindowsFolder(String folderKey) {
+        for (FileExplorerController controller : new ArrayList<>(FileExplorerWindow.getWindows())) {
+            if (controller != this && Objects.equals(folderKey, controller.currentKey)) {
+                controller.reloadFolderViewFromPreferences();
+            }
+        }
+    }
+
+    /** 其它窗口改了全局显示设置后调用；不回写，避免形成循环。 */
+    void reloadDisplayFromPreferences() {
+        ExplorerDisplayState state = ExplorerPreferences.display();
+        boolean contentChanged = state.checkboxes != checkboxes
+                || state.showExtensions != showExtensions
+                || state.compact != compact;
+        applyDisplayState(state);
+        applyDisplayVisuals(contentChanged);
+    }
+
+    /** 其它窗口改了同一文件夹的视图后调用；不回写，避免形成循环。 */
+    void reloadFolderViewFromPreferences() {
+        applyViewState(ExplorerPreferences.viewState(currentKey), true);
+    }
+
     private void setViewMode(String mode) {
-        viewMode = mode;
-        iconSize = iconSizeFor(mode);
-        renderContent();
+        changeView(state -> state.viewMode = mode);
     }
 
     private int iconSizeFor(String mode) {
@@ -3070,49 +3318,42 @@ public final class FileExplorerController {
     }
 
     private void setSort(String field) {
-        sortField = field;
-        renderContent();
+        changeView(state -> state.sortField = field);
     }
 
     private void toggleSort(String field) {
-        if (sortField.equals(field)) {
-            sortAsc = !sortAsc;
-        } else {
-            sortField = field;
-            sortAsc = true;
-        }
-        renderContent();
+        changeView(state -> {
+            if (state.sortField.equals(field)) {
+                state.sortAsc = !state.sortAsc;
+            } else {
+                state.sortField = field;
+                state.sortAsc = true;
+            }
+        });
     }
 
     private void setSortAscending(boolean ascending) {
-        sortAsc = ascending;
-        renderContent();
+        changeView(state -> state.sortAsc = ascending);
     }
 
     private void toggleNavPane() {
-        showNav = !showNav;
-        applyNavVisibility();
+        changeDisplay(state -> state.showNav = !state.showNav, false);
     }
 
     private void toggleCheckboxes() {
-        checkboxes = !checkboxes;
-        renderContent();
+        changeDisplay(state -> state.checkboxes = !state.checkboxes, true);
     }
 
     private void toggleCompact() {
-        compact = !compact;
-        renderContent();
+        changeDisplay(state -> state.compact = !state.compact, true);
     }
 
     private void setGroupBy(String value) {
-        groupBy = value;
-        collapsedGroups.clear();
-        renderContent();
+        changeView(state -> state.groupBy = value);
     }
 
     private void toggleExtensions() {
-        showExtensions = !showExtensions;
-        renderContent();
+        changeDisplay(state -> state.showExtensions = !state.showExtensions, true);
     }
 
     private void applyCompact() {
@@ -3128,9 +3369,7 @@ public final class FileExplorerController {
     }
 
     private void toggleDetailsPane() {
-        detailsPaneOpen = !detailsPaneOpen;
-        applyDetailsPaneVisibility();
-        updateDetailsPane();
+        changeDisplay(state -> state.showDetails = !state.showDetails, false);
     }
 
     private void applyDetailsPaneVisibility() {
@@ -3185,9 +3424,7 @@ public final class FileExplorerController {
     }
 
     private void togglePreview() {
-        previewOpen = !previewOpen;
-        applyPreviewVisibility();
-        updatePreview();
+        changeDisplay(state -> state.showPreview = !state.showPreview, false);
     }
 
     private void applyPreviewVisibility() {
@@ -3424,6 +3661,8 @@ public final class FileExplorerController {
         }
         // 记一笔访问：快速访问的「常用文件夹」按使用次数和最后访问时间排序。
         ExplorerPreferences.record(currentKey);
+        // 每个文件夹有自己的布局/排序/分组/列设置；进入时先恢复它。
+        applyViewState(ExplorerPreferences.viewState(currentKey), false);
         updateSearchPlaceholder();
         renderContent();
         // 导航树必须整体重绘：侧边栏的「常用文件夹」刚刚多了这一条，
@@ -4393,10 +4632,10 @@ public final class FileExplorerController {
         return "width:" + Math.round(sum) + "px;";
     }
 
-    private int visibleColumnCount() {
+    private static int visibleColumnCount(boolean[] visible) {
         int n = 0;
-        for (boolean visible : columnVisible) {
-            if (visible) {
+        for (boolean value : visible) {
+            if (value) {
                 n++;
             }
         }
@@ -4404,22 +4643,17 @@ public final class FileExplorerController {
     }
 
     private void toggleColumn(int col) {
-        if (columnVisible[col] && visibleColumnCount() <= 1) {
+        ExplorerViewState current = ExplorerPreferences.viewState(currentKey);
+        if (current.columnVisible[col] && visibleColumnCount(current.columnVisible) <= 1) {
             setStatus(t("informationera.fe.status_at_least_one_col"));
             return;
         }
-        columnVisible[col] = !columnVisible[col];
-        renderContent();
+        changeView(state -> state.columnVisible[col] = !state.columnVisible[col]);
     }
 
     private void resetColumnWidths() {
-        columnWidths.set(0, 320.0);
-        columnWidths.set(1, 160.0);
-        columnWidths.set(2, 120.0);
-        columnWidths.set(3, 100.0);
-        columnWidths.set(4, 140.0);
-        columnWidths.set(5, 100.0);
-        renderContent();
+        changeView(state -> System.arraycopy(ExplorerViewState.BUILT_IN_COLUMN_WIDTHS, 0,
+                state.columnWidths, 0, ExplorerViewState.COLUMN_COUNT));
     }
 
     private void showHeaderContextMenu(double x, double y) {
@@ -4435,10 +4669,7 @@ public final class FileExplorerController {
     }
 
     private void showAllColumns() {
-        for (int col = 0; col < columnVisible.length; col++) {
-            columnVisible[col] = true;
-        }
-        renderContent();
+        changeView(state -> Arrays.fill(state.columnVisible, true));
     }
 
     // ---------- 命名冲突对话框 ----------
@@ -5009,6 +5240,7 @@ public final class FileExplorerController {
      * <p>物品的原版提示框不在 DOM 里，单独走一遍校验。
      */
     void tickTooltip() {
+        ExplorerPreferences.tick();
         ExplorerItemTooltip.tick(document);
         if (!tooltipVisible || tooltip == null || document == null || !document.isActive()) {
             return;
@@ -5048,12 +5280,36 @@ public final class FileExplorerController {
     }
 
     private void bindButtonHint(String id, String text) {
+        bindButtonHint(id, () -> text);
+    }
+
+    /** 提示文案按当前窗口状态实时取值（最大化/还原按钮共用）。 */
+    private void bindButtonHint(String id, java.util.function.Supplier<String> text) {
         Element button = document.getElementById(id);
         if (button == null) {
             return;
         }
-        button.addEventListener("mouseover", e -> showButtonHint(button, text));
+        button.addEventListener("mouseover", e -> showButtonHint(button, text.get()));
         button.addEventListener("mouseout", e -> hideTooltip());
+    }
+
+    private String maximizeHint() {
+        return t(mode.isMaximized() ? "informationera.fe.restore" : "informationera.fe.max");
+    }
+
+    /** 同步标题栏最大化按钮的图标、无障碍标签与提示：最大化后显示“还原”。 */
+    private void updateMaximizeControl() {
+        Element max = document == null ? null : document.getElementById("fe-max");
+        if (max == null) {
+            return;
+        }
+        max.setAttribute("aria-label", maximizeHint());
+        max.setInnerHTML(mode.isMaximized()
+                ? "<svg viewBox=\"0 0 24 24\"><rect x=\"5\" y=\"8\" width=\"11\" height=\"11\" fill=\"none\""
+                + " stroke=\"currentColor\" stroke-width=\"2\"/><polyline points=\"9,8 9,5 19,5 19,15 16,15\""
+                + " fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"/></svg>"
+                : "<svg viewBox=\"0 0 24 24\"><rect x=\"5\" y=\"5\" width=\"14\" height=\"14\" fill=\"none\""
+                + " stroke=\"currentColor\" stroke-width=\"2\"/></svg>");
     }
 
     private void showButtonHint(Element button, String text) {

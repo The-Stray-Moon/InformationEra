@@ -4,6 +4,7 @@ import cc.sighs.informationera.net.DiskStateHandler;
 import com.sighs.apricityui.ApricityUI;
 import com.sighs.apricityui.init.Document;
 import com.sighs.apricityui.init.Element;
+import com.sighs.apricityui.init.Window;
 import com.sighs.apricityui.layout.Position;
 import com.sighs.apricityui.render.DocumentLayerOrder;
 import com.sighs.apricityui.render.Operation;
@@ -42,6 +43,17 @@ public final class FileExplorerWindow {
     private static int zCounter = BASE_Z;
     private static FileExplorerController focusedController;
 
+    /** AUI 的 resize 监听只挂一次；视口变化后统一让所有窗口重新贴合。 */
+    private static boolean viewportHookInstalled;
+
+    /**
+     * 最近一次被玩家主动调整几何（拖动/缩放/最大化/从最大化拖出）的窗口。
+     *
+     * <p>窗口持久化只认这一个所有者：关闭其它没动过的旧窗口时不能改写记录，
+     * 否则玩家最后调好的位置会被旧窗口的默认几何覆盖。
+     */
+    private static final ExplorerWindowGeometryOwner geometryOwner = new ExplorerWindowGeometryOwner();
+
     /** 跨窗口拖拽的全局状态（坐标均使用 AUI 屏幕坐标）。 */
     private static FileExplorerController dragSource;
     private static List<VirtualFileSystem.Entry> dragEntries;
@@ -76,6 +88,7 @@ public final class FileExplorerWindow {
         if (fs == null) {
             fs = VirtualFileSystem.create();
         }
+        installViewportHook();
         Document document = ApricityUI.createDocument(TEMPLATE);
         if (document == null) {
             return;
@@ -99,6 +112,22 @@ public final class FileExplorerWindow {
             FileExplorerController controller = windows.get(windows.size() - 1);
             controller.navigateToExternal(pathKey);
         }
+    }
+
+    /**
+     * 视口变化钩子：AUI 在游戏窗口尺寸/宽高比、分辨率、GUI 缩放或页面缩放变化后，
+     * 会给全局 {@code Window} 派发 resize 事件。只挂一次，之后统一让所有窗口重新贴合。
+     */
+    private static void installViewportHook() {
+        if (viewportHookInstalled) {
+            return;
+        }
+        viewportHookInstalled = true;
+        Window.window.addEventListener("resize", event -> {
+            for (FileExplorerController controller : new ArrayList<>(windows)) {
+                controller.adaptToViewport();
+            }
+        });
     }
 
     /** 聚焦窗口：置前（提高 body translateZ）并设为活跃，不改变窗口列表顺序。 */
@@ -249,8 +278,19 @@ public final class FileExplorerWindow {
         }
     }
 
+    /** 登记“最后被玩家调整几何”的窗口；之后只有它能改写窗口持久化。 */
+    static void markGeometryOwner(FileExplorerController controller) {
+        geometryOwner.mark(controller);
+    }
+
+    /** 该窗口是否是当前几何所有者（关闭时据此决定要不要覆盖持久化记录）。 */
+    static boolean isGeometryOwner(FileExplorerController controller) {
+        return geometryOwner.isOwner(controller);
+    }
+
     public static void unregister(FileExplorerController controller) {
         windows.remove(controller);
+        geometryOwner.forget(controller);
         if (dragSource == controller) {
             cancelDrag();
         }
@@ -547,6 +587,7 @@ public final class FileExplorerWindow {
         if (fs == null) {
             fs = VirtualFileSystem.create();
         }
+        installViewportHook();
         Document document = ApricityUI.createDocument(TEMPLATE);
         if (document == null) {
             return;

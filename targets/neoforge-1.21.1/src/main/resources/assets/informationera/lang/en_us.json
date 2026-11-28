@@ -111,6 +111,12 @@
   "informationera.fe.details_pane": "Details pane",
   "informationera.fe.checkboxes": "Item check boxes",
   "informationera.fe.extensions": "File name extensions",
+  "informationera.fe.set_default_view": "Use current view as default template",
+  "informationera.fe.restore_default_view": "Restore default view",
+  "informationera.fe.reset_all_views": "Reset all folder views on this disk",
+  "informationera.fe.status_default_view_saved": "Default view template saved",
+  "informationera.fe.status_default_view_restored": "Default view restored",
+  "informationera.fe.status_views_reset": "All folder views on this disk reset",
 
   "informationera.fe.folder": "Folder",
   "informationera.fe.empty_folder": "This folder is empty",

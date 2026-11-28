@@ -2,6 +2,10 @@ package cc.sighs.informationera.client;
 
 import cc.sighs.informationera.InformationEraNeoForge121;
 import cc.sighs.informationera.disk.DiskFolder;
+import cc.sighs.informationera.item.StorageCardItem;
+import cc.sighs.informationera.net.DiskStateHandler;
+import net.minecraft.client.Minecraft;
+import net.minecraft.world.item.ItemStack;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
@@ -11,6 +15,8 @@ import net.neoforged.neoforge.common.ModConfigSpec;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
+import java.util.UUID;
+import java.util.function.Consumer;
 import java.util.function.Predicate;
 
 /**
@@ -32,6 +38,11 @@ import java.util.function.Predicate;
  * <p>为什么放在客户端配置而不是服务端存档：这些是**玩家的界面习惯**（固定了哪些位置、常去
  * 哪些目录），换服务器也应该跟着走，而且不需要服务端知道。只存内存的话每次重启都会清空——
  * 那正是玩家看到「固定过的都没了」的原因。
+ *
+ * <p>同一个文件还保存资源管理器的显示习惯（窗格显隐/宽度、紧凑视图、复选框、扩展名）与
+ * 每个文件夹的布局/排序/分组/列设置。全局设置和默认模板按**本机玩家 UUID** 保存，换世界、
+ * 换服务器仍沿用同一套习惯；文件夹设置再带**储存卡 disk_uuid**，避免不同卡上相同的内置
+ * 目录 id 互相套用。快速访问仍按原来的全局方式保存。
  */
 @EventBusSubscriber(modid = InformationEraNeoForge121.MOD_ID, value = Dist.CLIENT)
 public final class ExplorerPreferences {
@@ -53,6 +64,23 @@ public final class ExplorerPreferences {
     private static final ModConfigSpec.ConfigValue<List<? extends String>> LEGACY_RECENT = BUILDER
             .comment("Deprecated, migrated into 'destinations'.")
             .defineListAllowEmpty("recent", new ArrayList<String>(), () -> "", ExplorerPreferences::isValidEntry);
+
+    /**
+     * 资源管理器的显示状态，一行一条记录：
+     * <ul>
+     *   <li>{@code g|玩家|全局显示}：窗格显隐/宽度、紧凑视图、复选框、扩展名，跟随本机玩家跨世界。</li>
+     *   <li>{@code d|玩家|视图}：该玩家的默认视图模板，新建/未设置过的文件夹使用。</li>
+     *   <li>{@code f|玩家|磁盘|文件夹|视图}：某磁盘上某文件夹自己的覆盖设置。</li>
+     * </ul>
+     *
+     * <p>磁盘字段是储存卡的 {@code disk_uuid} 十六进制串。不同卡上的根目录、预置分类目录
+     * 使用相同 id，必须带磁盘身份才不会串用。和快速访问一样放在客户端配置里：这些是玩家的
+     * 界面习惯，按本机玩家保存；快速访问仍是原来的全局跳转列表。
+     */
+    private static final ModConfigSpec.ConfigValue<List<? extends String>> VIEW_STATE = BUILDER
+            .comment("Explorer display and per-folder view state. Global/default values follow the local player; "
+                    + "folder overrides include the storage card disk uuid. Managed by the mod.")
+            .defineListAllowEmpty("viewState", new ArrayList<String>(), () -> "", ExplorerPreferences::isValidEntry);
 
     /**
      * 「常用文件夹」的条数上限。
@@ -84,6 +112,15 @@ public final class ExplorerPreferences {
     /** 内存镜像：界面读它，改完写回配置。顺序即展示顺序，固定项在前。 */
     private static final List<Destination> destinations = new ArrayList<>();
     private static boolean loaded;
+
+    /** 显示偏好的内存存储；每个身份、每个文件夹各一条，修改时只动目标记录。 */
+    private static ExplorerViewStore viewStore = new ExplorerViewStore();
+    /** 是否有尚未落盘的显示偏好修改。 */
+    private static boolean viewDirty;
+    /** 最近一次显示偏好修改的时间，用于延迟合并写盘。 */
+    private static long viewChangedAt;
+    /** 连续修改（例如拖动列宽）安静这么久之后才写配置。 */
+    private static final long VIEW_FLUSH_DELAY_MS = 750L;
 
     private ExplorerPreferences() {
     }
@@ -151,9 +188,14 @@ public final class ExplorerPreferences {
             }
             migrate = !loadedDestinations.isEmpty();
         }
-        // 两次读取都成功，才覆盖内存镜像。
+        ExplorerViewStore loadedViews = ExplorerViewStore.decode(VIEW_STATE.get());
+        // 两次读取都成功，才覆盖内存镜像。显示偏好若还有未落盘的修改，以内存为准，
+        // 避免外部重载把玩家刚做的调整吞掉。
         destinations.clear();
         destinations.addAll(loadedDestinations);
+        if (!viewDirty) {
+            viewStore = loadedViews;
+        }
         rank();
         loaded = true;
         if (migrate) {
@@ -180,6 +222,58 @@ public final class ExplorerPreferences {
         } catch (IllegalStateException notLoadedYet) {
             // 配置还没加载好，保持 loaded = false，下次再试。
         }
+    }
+
+    /**
+     * 每 tick 调用：显示偏好是高频操作（拖动列宽/窗格），延迟到修改安静下来再写盘，
+     * 避免每次鼠标移动都触发一次配置文件保存。
+     */
+    public static void tick() {
+        if (!viewDirty) {
+            return;
+        }
+        if (System.currentTimeMillis() - viewChangedAt >= VIEW_FLUSH_DELAY_MS) {
+            flush();
+        }
+    }
+
+    /** 立即把待写的显示偏好落盘（窗口关闭、离开世界时调用）。 */
+    public static void flush() {
+        if (!viewDirty || !loaded) {
+            return;
+        }
+        VIEW_STATE.set(viewStore.encode());
+        SPEC.save();
+        viewDirty = false;
+    }
+
+    private static void touchView() {
+        viewDirty = true;
+        viewChangedAt = System.currentTimeMillis();
+    }
+
+    /**
+     * 本机玩家身份：只取玩家 UUID。
+     *
+     * <p>全局显示习惯和默认视图模板跟着玩家走，所以不能把服务器/存档编进来：
+     * 同一个玩家进入不同世界时应该沿用同一套界面习惯。
+     */
+    static String playerIdentity() {
+        Minecraft mc = Minecraft.getInstance();
+        return mc.player == null ? "anonymous" : mc.player.getUUID().toString();
+    }
+
+    /**
+     * 当前磁盘身份：设备插槽里储存卡的 {@code disk_uuid}。
+     *
+     * <p>服务端按这张卡的 uuid 分片保存磁盘，根目录与内置分类目录 id 在不同卡上完全相同；
+     * 文件夹视图必须带上这个稳定身份，不能用磁盘名（可重命名）或设备槽位推导。
+     * 还没收到设备状态、或卡尚未绑定时返回 null，此时不读也不写任何文件夹设置。
+     */
+    static String diskIdentity() {
+        ItemStack card = DiskStateHandler.device().card();
+        UUID id = StorageCardItem.diskId(card);
+        return id == null ? null : id.toString();
     }
 
     private static boolean isValidEntry(Object value) {
@@ -268,7 +362,11 @@ public final class ExplorerPreferences {
             raw.add(encode(destination));
         }
         DESTINATIONS.set(raw);
+        if (viewDirty) {
+            VIEW_STATE.set(viewStore.encode());
+        }
         SPEC.save();
+        viewDirty = false;
     }
 
     private static int indexOf(List<Destination> list, String key) {
@@ -381,8 +479,125 @@ public final class ExplorerPreferences {
     public static void pruneUnknown(Predicate<String> exists) {
         ensureLoaded();
         boolean changed = destinations.removeIf(destination -> !exists.test(destination.key));
+        String disk = diskIdentity();
+        if (disk != null && viewStore.pruneFolders(playerIdentity(), disk, exists)) {
+            touchView();
+            changed = true;
+        }
         if (changed) {
             persist();
         }
+    }
+
+    // ------------------------------------------- 显示偏好（玩家 / 磁盘两级作用域）
+
+    /** 本机玩家的全局显示设置。 */
+    public static ExplorerDisplayState display() {
+        ensureLoaded();
+        return viewStore.display(playerIdentity());
+    }
+
+    /**
+     * 只修改全局显示设置里的指定字段，再返回最终状态。
+     *
+     * <p>多个窗口同时打开时，每个窗口都基于存储里的最新记录改自己的那一项，
+     * 不会用本地快照整体覆盖另一个窗口刚写进去的设置。
+     */
+    public static ExplorerDisplayState updateDisplay(Consumer<ExplorerDisplayState> mutation) {
+        ensureLoaded();
+        String player = playerIdentity();
+        ExplorerDisplayState before = viewStore.display(player);
+        ExplorerDisplayState state = before.copy();
+        mutation.accept(state);
+        state.normalize();
+        viewStore.setDisplay(player, state);
+        if (!state.equals(before)) {
+            touchView();
+        }
+        return viewStore.display(player);
+    }
+
+    /**
+     * 当前磁盘上某文件夹最终生效的视图设置。
+     *
+     * <p>磁盘身份尚未到达时不读写任何磁盘相关记录，只返回本机玩家的默认模板；
+     * 设备状态到达后窗口会重新调用这里。
+     */
+    public static ExplorerViewState viewState(String folderKey) {
+        ensureLoaded();
+        String player = playerIdentity();
+        String disk = diskIdentity();
+        if (disk == null) {
+            return viewStore.defaultView(player);
+        }
+        return viewStore.view(player, disk, normalizeFolderKey(folderKey));
+    }
+
+    /**
+     * 只修改当前文件夹视图里的指定字段，再返回最终状态。
+     *
+     * <p>按「玩家 + 磁盘 + 文件夹」先读最新记录再改，避免两个窗口同时调整同一文件夹、
+     * 或切换磁盘时把别的盘设置覆盖掉。
+     */
+    public static ExplorerViewState updateView(String folderKey, Consumer<ExplorerViewState> mutation) {
+        ensureLoaded();
+        String player = playerIdentity();
+        String disk = diskIdentity();
+        String key = normalizeFolderKey(folderKey);
+        if (disk == null) {
+            // 设备状态还没到：只更新临时显示，不落任何磁盘相关记录。
+            ExplorerViewState transientState = viewStore.defaultView(player);
+            mutation.accept(transientState);
+            transientState.normalize();
+            return transientState;
+        }
+        ExplorerViewState before = viewStore.view(player, disk, key);
+        ExplorerViewState state = before.copy();
+        mutation.accept(state);
+        state.normalize();
+        viewStore.setView(player, disk, key, state);
+        if (!state.equals(before)) {
+            touchView();
+        }
+        return viewStore.view(player, disk, key);
+    }
+
+    /** 把当前文件夹的生效视图存为本机玩家的默认模板。 */
+    public static void setDefaultView(String folderKey) {
+        ensureLoaded();
+        String player = playerIdentity();
+        String disk = diskIdentity();
+        if (disk == null) {
+            return;
+        }
+        ExplorerViewState before = viewStore.defaultView(player);
+        ExplorerViewState next = viewStore.view(player, disk, normalizeFolderKey(folderKey));
+        if (next.equals(before)) {
+            return;
+        }
+        viewStore.setDefaultView(player, next);
+        touchView();
+    }
+
+    /** 清除当前磁盘上当前文件夹的独立设置，让它回到默认模板。 */
+    public static void resetFolderView(String folderKey) {
+        ensureLoaded();
+        String disk = diskIdentity();
+        if (disk != null && viewStore.resetView(playerIdentity(), disk, normalizeFolderKey(folderKey))) {
+            touchView();
+        }
+    }
+
+    /** 清除当前磁盘上所有文件夹的独立设置（默认模板保留）。 */
+    public static void resetAllFolderViews() {
+        ensureLoaded();
+        String disk = diskIdentity();
+        if (disk != null && viewStore.resetAllViews(playerIdentity(), disk)) {
+            touchView();
+        }
+    }
+
+    private static String normalizeFolderKey(String folderKey) {
+        return folderKey == null || folderKey.isBlank() ? DiskFolder.ROOT_ID : folderKey;
     }
 }

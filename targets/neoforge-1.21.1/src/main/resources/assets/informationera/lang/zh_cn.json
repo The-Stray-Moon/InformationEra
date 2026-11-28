@@ -111,6 +111,12 @@
   "informationera.fe.details_pane": "详细信息窗格",
   "informationera.fe.checkboxes": "复选框选择",
   "informationera.fe.extensions": "文件扩展名",
+  "informationera.fe.set_default_view": "将当前视图设为默认模板",
+  "informationera.fe.restore_default_view": "恢复默认视图",
+  "informationera.fe.reset_all_views": "重置此磁盘所有文件夹视图",
+  "informationera.fe.status_default_view_saved": "已记录默认视图模板",
+  "informationera.fe.status_default_view_restored": "已恢复默认视图",
+  "informationera.fe.status_views_reset": "已重置此磁盘所有文件夹视图",
 
   "informationera.fe.folder": "文件夹",
   "informationera.fe.empty_folder": "此文件夹为空",
