@@ -83,6 +83,9 @@
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg><span class="fe-cmd-label">查看</span> ▾
             </button>
             <span class="fe-cmd-spacer"></span>
+            <button class="fe-cmd-btn" id="fe-filter" type="button" aria-pressed="false">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 5h18l-7 8v6l-4 2v-8z"/></svg><span class="fe-cmd-label">筛选</span>
+            </button>
             <button class="fe-cmd-btn" id="fe-preview" type="button">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16"/><line x1="14" y1="4" x2="14" y2="20"/></svg><span class="fe-cmd-label">预览</span>
             </button>
@@ -97,6 +100,7 @@
             </main>
             <div class="fe-pane-resizer" id="fe-preview-resizer" data-resize="preview"></div>
             <aside class="fe-preview-pane" id="fe-preview-pane"></aside>
+            <aside class="fe-filter-pane" id="fe-filter-pane"></aside>
         </div>
 
         <div class="fe-statusbar">
@@ -166,6 +170,17 @@
     </div>
 
     <input class="fe-rename-input" id="fe-rename-input" type="text">
+
+    <div class="fe-filter-dialog-overlay" id="fe-filter-dialog-overlay"></div>
+    <div class="fe-filter-dialog" id="fe-filter-dialog">
+        <div class="fe-filter-dialog-titlebar">
+            <span class="fe-filter-dialog-title" id="fe-filter-dialog-title"></span>
+            <button class="fe-filter-dialog-close" id="fe-filter-dialog-close" type="button" aria-label="关闭">
+                <svg viewBox="0 0 12 12"><line x1="2" y1="2" x2="10" y2="10" stroke="currentColor" stroke-width="1.5"/><line x1="10" y1="2" x2="2" y2="10" stroke="currentColor" stroke-width="1.5"/></svg>
+            </button>
+        </div>
+        <div class="fe-filter-dialog-body" id="fe-filter-dialog-body"></div>
+    </div>
 
     <div class="fe-tooltip" id="fe-tooltip"></div>
 

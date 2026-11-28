@@ -477,7 +477,7 @@
     display: none;
 }
 
-/* 导航 / 预览窗格之间的可拖拽分隔条。 */
+/* 导航 / 预览 / 筛选窗格之间的可拖拽分隔条。 */
 .fe-pane-resizer {
     flex: 0 0 6px;
     width: 6px;
@@ -2252,4 +2252,466 @@
     pointer-events: none;
     white-space: nowrap;
     font-size: var(--ore-font-sm);
+}
+
+/* ---------- 筛选窗格 ---------- */
+/* 命令栏上的筛选按钮处于打开状态时，和按下的工具按钮同一观感。 */
+.fe-cmd-btn.active {
+    color: #ffffff;
+    background: var(--ore-green);
+    border-color: var(--ore-green);
+}
+
+.fe-cmd-btn.active:hover {
+    color: #ffffff;
+    background: var(--ore-green);
+    border-color: var(--ore-green);
+}
+
+.fe-filter-pane {
+    flex: 0 0 auto;
+    width: 240px;
+    min-width: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    padding: 10px 10px 14px;
+    background: var(--ore-surface-deep);
+    border-left: 3px solid var(--ore-edge);
+    color: var(--ore-ink);
+    display: none;
+}
+
+.fe-filter-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+.fe-filter-title {
+    flex: 1 1 auto;
+    color: #ffffff;
+    font-size: var(--ore-font-md);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.fe-filter-clear {
+    flex: 0 0 auto;
+    min-height: 24px;
+    padding: 2px 8px;
+    border: 2px solid var(--ore-edge);
+    color: var(--ore-ink);
+    background: var(--ore-surface);
+    cursor: pointer;
+    font-size: var(--ore-font-sm);
+}
+
+.fe-filter-clear:hover {
+    color: #ffffff;
+    background: var(--ore-red);
+    border-color: var(--ore-red);
+}
+
+.fe-filter-clear:disabled {
+    opacity: 0.4;
+    cursor: default;
+}
+
+.fe-filter-clear:disabled:hover {
+    color: var(--ore-ink);
+    background: var(--ore-surface);
+    border-color: var(--ore-edge);
+}
+
+/* 「展开所有子文件夹」开关 */
+.fe-filter-switch-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 2px 10px;
+    cursor: pointer;
+    user-select: none;
+}
+
+.fe-filter-switch {
+    position: relative;
+    flex: 0 0 34px;
+    width: 34px;
+    height: 18px;
+    border: 2px solid var(--ore-edge-light);
+    background: var(--ore-canvas);
+}
+
+.fe-filter-switch-knob {
+    position: absolute;
+    top: 1px;
+    left: 1px;
+    width: 12px;
+    height: 12px;
+    background: var(--ore-ink-muted);
+}
+
+.fe-filter-switch.on {
+    background: var(--ore-green);
+    border-color: var(--ore-green);
+}
+
+.fe-filter-switch.on .fe-filter-switch-knob {
+    left: 17px;
+    background: #ffffff;
+}
+
+.fe-filter-switch-label {
+    flex: 1 1 auto;
+    color: var(--ore-ink);
+    font-size: var(--ore-font-sm);
+    line-height: 1.3;
+}
+
+.fe-filter-section {
+    padding-top: 10px;
+    margin-top: 8px;
+    border-top: 1px solid var(--ore-edge);
+}
+
+.fe-filter-section:first-of-type {
+    border-top: 0;
+}
+
+.fe-filter-section-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 6px;
+}
+
+.fe-filter-section-title {
+    flex: 1 1 auto;
+    color: var(--ore-ink-muted);
+    font-size: var(--ore-font-sm);
+}
+
+.fe-filter-more {
+    flex: 0 0 auto;
+    min-height: 22px;
+    padding: 1px 6px;
+    border: 2px solid transparent;
+    color: var(--ore-ink-muted);
+    background: transparent;
+    cursor: pointer;
+    font-size: var(--ore-font-sm);
+}
+
+.fe-filter-more:hover {
+    color: #ffffff;
+    background: var(--ore-surface);
+    border-color: var(--ore-edge);
+}
+
+.fe-filter-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-bottom: 6px;
+}
+
+.fe-filter-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    max-width: 100%;
+    min-height: 20px;
+    padding: 1px 3px 1px 6px;
+    border: 1px solid var(--ore-edge-light);
+    background: var(--ore-surface);
+    color: var(--ore-ink);
+    font-size: 11px;
+    cursor: pointer;
+}
+
+.fe-filter-chip:hover {
+    border-color: var(--ore-red);
+}
+
+.fe-filter-chip-text {
+    min-width: 0;
+    max-width: 150px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.fe-filter-chip-x {
+    flex: 0 0 auto;
+    width: 14px;
+    height: 14px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--ore-ink-muted);
+    font-size: 12px;
+    line-height: 1;
+}
+
+.fe-filter-chip-x:hover {
+    color: #ffffff;
+    background: var(--ore-red);
+}
+
+.fe-filter-none {
+    color: var(--ore-ink-muted);
+    font-size: 11px;
+    opacity: 0.8;
+}
+
+.fe-filter-input-wrap {
+    position: relative;
+}
+
+.fe-filter-input {
+    width: 100%;
+    min-height: 26px;
+    height: 26px;
+    padding: 2px 6px;
+    font-size: var(--ore-font-sm);
+    box-sizing: border-box;
+}
+
+.fe-filter-suggest {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: calc(100% + 2px);
+    z-index: 50;
+    max-height: 180px;
+    overflow-y: auto;
+    background: var(--ore-surface);
+    border: 2px solid var(--ore-edge);
+    box-shadow: 4px 4px 0 rgba(0, 0, 0, 0.35);
+    display: flex;
+    flex-direction: column;
+}
+
+.fe-filter-suggest:empty {
+    display: none;
+}
+
+.fe-filter-suggestion {
+    min-height: 24px;
+    padding: 2px 6px;
+    border: 0;
+    color: var(--ore-ink);
+    background: transparent;
+    text-align: left;
+    cursor: pointer;
+    font-size: var(--ore-font-sm);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.fe-filter-suggestion:hover {
+    color: #ffffff;
+    background: var(--ore-green);
+}
+
+/* ---------- 筛选条件弹窗 ---------- */
+.fe-filter-dialog-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    z-index: 750;
+    transform: translateZ(300px);
+    display: none;
+    pointer-events: auto;
+    background: rgba(0, 0, 0, 0.35);
+}
+
+.fe-filter-dialog {
+    position: absolute;
+    z-index: 760;
+    transform: translateZ(300px);
+    display: none;
+    width: 560px;
+    max-width: calc(100vw - 24px);
+    max-height: calc(100vh - 16px);
+    color: var(--ore-ink);
+    background: var(--ore-surface-deep);
+    border: 3px solid var(--ore-edge);
+    box-shadow: 6px 6px 0 rgba(0, 0, 0, 0.35);
+    pointer-events: auto;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.fe-filter-dialog-titlebar {
+    display: flex;
+    align-items: center;
+    height: 32px;
+    flex: 0 0 32px;
+    padding: 0 6px 0 12px;
+    background: var(--ore-surface);
+    border-bottom: 2px solid var(--ore-edge);
+}
+
+.fe-filter-dialog-title {
+    flex: 1 1 auto;
+    color: #ffffff;
+    font-size: var(--ore-font-md);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.fe-filter-dialog-close {
+    flex: 0 0 26px;
+    width: 26px;
+    height: 26px;
+    border: 0;
+    color: #ffffff;
+    background: transparent;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.fe-filter-dialog-close:hover {
+    background: var(--ore-red);
+}
+
+.fe-filter-dialog-close svg {
+    width: 12px;
+    height: 12px;
+}
+
+.fe-filter-dialog-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 10px 12px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.fe-filter-dialog-search-wrap {
+    position: relative;
+    flex: 0 0 auto;
+}
+
+.fe-filter-dialog-suggest {
+    max-height: 220px;
+}
+
+.fe-filter-dialog-section {
+    flex: 0 0 auto;
+    border-top: 1px solid var(--ore-edge);
+    padding-top: 8px;
+}
+
+.fe-filter-dialog-section:first-of-type {
+    border-top: 0;
+    padding-top: 0;
+}
+
+.fe-filter-dialog-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 6px;
+    color: var(--ore-ink-muted);
+    font-size: var(--ore-font-sm);
+}
+
+.fe-filter-count {
+    color: var(--ore-ink-muted);
+    font-size: 11px;
+    opacity: 0.8;
+}
+
+.fe-filter-history-row {
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 4px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    min-height: 22px;
+}
+
+.fe-filter-history-value {
+    flex: 0 0 auto;
+    max-width: 150px;
+    min-height: 22px;
+    padding: 1px 8px;
+    border: 2px solid var(--ore-edge);
+    color: var(--ore-ink);
+    background: var(--ore-surface);
+    cursor: pointer;
+    font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.fe-filter-history-value:hover {
+    color: #ffffff;
+    background: var(--ore-green);
+    border-color: var(--ore-green);
+}
+
+.fe-filter-dialog-candidates {
+    flex: 1 1 auto;
+    min-height: 120px;
+    display: flex;
+    flex-direction: column;
+}
+
+.fe-filter-value-list {
+    flex: 1 1 auto;
+    min-height: 80px;
+    overflow-y: auto;
+    border: 2px solid var(--ore-edge);
+    background: var(--ore-canvas);
+    padding: 3px;
+    display: flex;
+    flex-wrap: wrap;
+    align-content: flex-start;
+    gap: 3px;
+}
+
+.fe-filter-value {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    max-width: 100%;
+    min-height: 22px;
+    padding: 1px 8px;
+    border: 1px solid var(--ore-edge-light);
+    color: var(--ore-ink);
+    background: var(--ore-surface);
+    cursor: pointer;
+    font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.fe-filter-value:hover {
+    color: #ffffff;
+    background: var(--ore-green);
+    border-color: var(--ore-green);
+}
+
+.fe-filter-check {
+    color: var(--ore-green);
+    font-size: 11px;
+}
+
+.fe-filter-value:hover .fe-filter-check {
+    color: #ffffff;
 }

@@ -50,6 +50,8 @@ public final class VirtualFileSystem {
         public final String author;
         /** 仅文件夹有意义：进入该文件夹所用的 key（等于 id，保留以兼容既有调用点）。 */
         public final String childKey;
+        /** 该条目实际所在的父文件夹 key；扁平/子树视图用它定位真实来源。 */
+        public final String parentFolderKey;
         /**
          * 快捷方式目标：该功能已取消（文件本身就是物品引用，Alt+拖动即为复制引用），
          * 恒为 null。保留字段是为了不牵动既有的菜单渲染与判定代码。
@@ -65,7 +67,7 @@ public final class VirtualFileSystem {
 
         private Entry(String id, String name, boolean folder, int childCount, long count, ItemKey itemKey,
                       String itemId, String type, String modified, String created, String author,
-                      String childKey, String recycleOrigin, boolean cut) {
+                      String childKey, String parentFolderKey, String recycleOrigin, boolean cut) {
             this.id = id;
             this.name = name;
             this.folder = folder;
@@ -78,6 +80,7 @@ public final class VirtualFileSystem {
             this.created = created;
             this.author = author;
             this.childKey = childKey;
+            this.parentFolderKey = parentFolderKey;
             this.recycleOrigin = recycleOrigin;
             this.cut = cut;
             this.size = folder ? -1L : count;
@@ -141,7 +144,7 @@ public final class VirtualFileSystem {
         }
         host.entries.add(new Entry(DiskFolder.ROOT_ID, diskLabel, true, childCount, -1L, null, null,
                 FileExplorerText.t("informationera.fe.folder_type"), "", "", null,
-                DiskFolder.ROOT_ID, null, false));
+                DiskFolder.ROOT_ID, DiskFolder.HOST_ID, null, false));
         parents.put(DiskFolder.ROOT_ID, DiskFolder.HOST_ID);
     }
 
@@ -183,11 +186,11 @@ public final class VirtualFileSystem {
                 fs.parents.put(childId, folder.id());
                 DiskFile file = disk.file(childId);
                 if (file != null) {
-                    target.entries.add(fs.fileEntry(disk, file, registries));
+                    target.entries.add(fs.fileEntry(disk, file, registries, folder.id()));
                 } else {
                     DiskFolder child = disk.folder(childId);
                     if (child != null) {
-                        target.entries.add(fs.folderEntry(disk, child));
+                        target.entries.add(fs.folderEntry(disk, child, folder.id()));
                     }
                 }
             }
@@ -200,12 +203,12 @@ public final class VirtualFileSystem {
         return fs;
     }
 
-    private Entry folderEntry(PlayerDisk disk, DiskFolder folder) {
+    private Entry folderEntry(PlayerDisk disk, DiskFolder folder, String parentFolderKey) {
         String origin = disk.isInRecycleBin(folder.id()) ? parents.get(folder.id()) : null;
         return new Entry(folder.id(), displayFolderName(folder), true, disk.childrenOf(folder.id()).size(), -1L, null, null,
                 FileExplorerText.t("informationera.fe.folder_type"),
                 formatTime(folder.updatedAt()), formatTime(folder.createdAt()), null,
-                folder.id(), origin, cutIds.contains(folder.id()));
+                folder.id(), parentFolderKey, origin, cutIds.contains(folder.id()));
     }
 
     /**
@@ -227,7 +230,7 @@ public final class VirtualFileSystem {
         return folder.name();
     }
 
-    private Entry fileEntry(PlayerDisk disk, DiskFile file, HolderLookup.Provider registries) {
+    private Entry fileEntry(PlayerDisk disk, DiskFile file, HolderLookup.Provider registries, String parentFolderKey) {
         long count = disk.quantityOf(file.key());
         String origin = disk.isInRecycleBin(file.id()) ? parents.get(file.id()) : null;
         // 名字直接来自磁盘：入库时就写的是物品的显示名，所以这里原样显示。
@@ -235,7 +238,7 @@ public final class VirtualFileSystem {
                 file.key().itemId(),
                 FileExplorerText.t("informationera.fe.item_type"),
                 formatTime(file.updatedAt()), formatTime(file.createdAt()), null,
-                null, origin, cutIds.contains(file.id()));
+                null, parentFolderKey, origin, cutIds.contains(file.id()));
     }
 
     /** 展示用物品栈：数量已夹到堆叠上限，真实数量由 {@link #overlayTextOf} 呈现。 */
@@ -298,6 +301,34 @@ public final class VirtualFileSystem {
             if (entry.folder) {
                 return true;
             }
+        }
+        return false;
+    }
+
+    /**
+     * {@code key} 是否就是 {@code ancestor} 或位于它的子树里。
+     *
+     * <p>文件夹 id 不是路径，不能靠字符串前缀判断；这里沿 parentKey 向上走，
+     * 并用 visited 防住异常数据造成的循环。
+     */
+    public boolean isWithin(String key, String ancestor) {
+        if (key == null || ancestor == null) {
+            return false;
+        }
+        if (key.equals(ancestor)) {
+            return true;
+        }
+        Set<String> visited = new HashSet<>();
+        String current = key;
+        while (current != null && visited.add(current)) {
+            Folder folder = folders.get(current);
+            if (folder == null || folder.parentKey == null) {
+                return false;
+            }
+            if (folder.parentKey.equals(ancestor)) {
+                return true;
+            }
+            current = folder.parentKey;
         }
         return false;
     }

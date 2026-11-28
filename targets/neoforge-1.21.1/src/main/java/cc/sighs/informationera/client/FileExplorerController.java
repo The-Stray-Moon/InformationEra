@@ -62,6 +62,9 @@ public final class FileExplorerController {
      */
     private static final double RENAME_MIN_HEIGHT = 28.0;
 
+    /** 「展开所有子文件夹」时递归收集的最大层数，与磁盘允许的最大嵌套深度一致。 */
+    private static final int MAX_FILTER_DEPTH = 64;
+
     private static final String NAME_COLUMN_ID = ExplorerViewState.NAME_COLUMN_ID;
 
     private static FileExplorerController ACTIVE;
@@ -144,6 +147,15 @@ public final class FileExplorerController {
     private boolean showNav = true;
     private boolean checkboxes = false;
     private boolean previewOpen = false;
+    /** 筛选窗格与预览窗格共用右侧位置，两者互斥。 */
+    private boolean filterOpen = false;
+    private boolean filterDialogOpen = false;
+    private ExplorerFilterSelection.Kind filterDialogKind = ExplorerFilterSelection.Kind.TAG;
+    /** 当前筛选选择；关闭窗格后仍保留，重新打开时继续使用，但不参与关闭状态下的显示。 */
+    private final ExplorerFilterSelection filterSelection = new ExplorerFilterSelection();
+    /** 当前范围内每类条件的候选全集；范围/视图变化时整体失效。 */
+    private final java.util.Map<ExplorerFilterSelection.Kind, List<String>> filterCandidateCache =
+            new java.util.EnumMap<>(ExplorerFilterSelection.Kind.class);
     private int previewSize = 64;
     /** 预览图标尺寸的上下限与每次缩放的步长（像素）。 */
     private static final int PREVIEW_SIZE_MIN = 16;
@@ -278,6 +290,7 @@ public final class FileExplorerController {
         hideTooltip();
         closeContextMenu();
         closeColumnManager();
+        closeFilterDialog();
         // 只有“最近一次被玩家亲手调整过几何”的窗口才有资格改写持久化记录：
         // 关掉一个没动过的旧窗口不能把玩家刚调好的位置覆盖回去。
         if (FileExplorerWindow.isGeometryOwner(this)) {
@@ -325,6 +338,12 @@ public final class FileExplorerController {
         tabs.clear();
         tabs.add(new Tab());
         activeTab = 0;
+        // 筛选窗格是窗口会话状态；重新挂载时从干净状态开始，避免旧条件落到新视图上。
+        filterOpen = false;
+        filterDialogOpen = false;
+        filterSelection.clear();
+        filterSelection.includeSubfolders = false;
+        filterCandidateCache.clear();
         // 先恢复全局显示习惯与当前文件夹的视图，后面的渲染才有正确的初始值。
         applyDisplayState(ExplorerPreferences.display());
         applyViewState(ExplorerPreferences.viewState(currentKey), false);
@@ -417,6 +436,7 @@ public final class FileExplorerController {
         setCmdLabel("fe-new", t("informationera.fe.new"));
         setCmdLabel("fe-sort", t("informationera.fe.sort"));
         setCmdLabel("fe-layout", t("informationera.fe.layout"));
+        setCmdLabel("fe-filter", t("informationera.fe.filter"));
         setCmdLabel("fe-preview", t("informationera.fe.preview"));
     }
 
@@ -491,6 +511,7 @@ public final class FileExplorerController {
         bindToolButton("fe-cmd-paste", this::paste);
         bindToolButton("fe-cmd-rename", this::renamePrimary);
         bindToolButton("fe-cmd-delete", this::delete);
+        bindToolButton("fe-filter", this::toggleFilter);
         bindToolButton("fe-preview", this::togglePreview);
         bindToolButton("fe-view-details", () -> setViewMode("details"));
         bindToolButton("fe-view-thumb", () -> setViewMode("large"));
@@ -513,6 +534,7 @@ public final class FileExplorerController {
         bindButtonHint("fe-cmd-delete", t("informationera.fe.delete"));
         bindButtonHint("fe-sort", t("informationera.fe.sort"));
         bindButtonHint("fe-layout", t("informationera.fe.layout"));
+        bindButtonHint("fe-filter", t("informationera.fe.filter"));
         bindButtonHint("fe-preview", t("informationera.fe.preview"));
         bindButtonHint("fe-view-details", t("informationera.fe.details"));
         bindButtonHint("fe-view-thumb", t("informationera.fe.thumb"));
@@ -655,6 +677,21 @@ public final class FileExplorerController {
         document.addEventListener("keydown", e -> {
             if (e instanceof KeyEvent ke && "Escape".equalsIgnoreCase(ke.key) && columnManagerOpen) {
                 closeColumnManager();
+            }
+        });
+
+        // 筛选条件弹窗：关闭 / 遮罩 / Esc。
+        Element filterClose = document.getElementById("fe-filter-dialog-close");
+        if (filterClose != null) {
+            filterClose.addEventListener("click", e -> closeFilterDialog());
+        }
+        Element filterOverlay = document.getElementById("fe-filter-dialog-overlay");
+        if (filterOverlay != null) {
+            filterOverlay.addEventListener("click", e -> closeFilterDialog());
+        }
+        document.addEventListener("keydown", e -> {
+            if (e instanceof KeyEvent ke && "Escape".equalsIgnoreCase(ke.key) && filterDialogOpen) {
+                closeFilterDialog();
             }
         });
 
@@ -824,6 +861,8 @@ public final class FileExplorerController {
                 || hit.closest(".fe-properties-dialog") != null
                 || hit.closest(".fe-columns-dialog") != null
                 || hit.closest(".fe-columns-overlay") != null
+                || hit.closest(".fe-filter-dialog") != null
+                || hit.closest(".fe-filter-dialog-overlay") != null
                 || hit.closest(".fe-selection-rect") != null
                 || hit.closest(".fe-tooltip") != null
                 || hit.closest(".fe-rename-input") != null
@@ -836,8 +875,8 @@ public final class FileExplorerController {
             if (!(e instanceof KeyEvent ke)) {
                 return;
             }
-            // 列选择是模态对话框：键盘操作不能再落到背后的文件列表。
-            if (columnManagerOpen) {
+            // 列选择 / 筛选条件是模态对话框：键盘操作不能再落到背后的文件列表。
+            if (columnManagerOpen || filterDialogOpen) {
                 return;
             }
             String key = ke.key;
@@ -926,7 +965,10 @@ public final class FileExplorerController {
         }
         return active == document.getElementById("fe-search")
                 || active == document.getElementById("fe-rename-input")
-                || active == document.getElementById("fe-address-input");
+                || active == document.getElementById("fe-address-input")
+                || active == document.getElementById("fe-filter-dialog-search")
+                || active.getClassList().contains("fe-filter-input")
+                || active.closest(".fe-filter-input") != null;
     }
 
     private void focusSearch() {
@@ -1694,6 +1736,10 @@ public final class FileExplorerController {
         if (preview != null) {
             preview.setInlineStyleProperty("width", px(previewWidth));
         }
+        Element filter = document.getElementById("fe-filter-pane");
+        if (filter != null) {
+            filter.setInlineStyleProperty("width", px(previewWidth));
+        }
     }
 
     private void activateCapture() {
@@ -2032,7 +2078,10 @@ public final class FileExplorerController {
         if (hit.closest(".fe-cmd-btn") != null || hit.closest(".fe-tool-btn") != null
                 || hit.closest(".fe-tab-close") != null || hit.closest(".fe-window-btn") != null
                 || hit.closest(".fe-tab-new") != null || hit.closest(".fe-nav-item") != null
-                || hit.closest(".fe-crumb") != null || hit.closest(".fe-status-view") != null) {
+                || hit.closest(".fe-crumb") != null || hit.closest(".fe-status-view") != null
+                || hit.closest(".fe-filter-chip") != null || hit.closest(".fe-filter-more") != null
+                || hit.closest(".fe-filter-clear") != null || hit.closest(".fe-filter-switch-row") != null
+                || hit.closest(".fe-filter-value") != null || hit.closest(".fe-filter-history-value") != null) {
             return "pointer";
         }
         return null;
@@ -2071,12 +2120,14 @@ public final class FileExplorerController {
         // 过滤无效项（移动到自己内部、原地移动）。
         List<VirtualFileSystem.Entry> valid = new ArrayList<>();
         for (VirtualFileSystem.Entry entry : entries) {
-            if (entry.folder && entry.childKey != null && targetKey.startsWith(entry.childKey)) {
+            if (entry.folder && entry.childKey != null && fs.isWithin(targetKey, entry.childKey)) {
                 continue;
             }
             // 注意：复制到同一个文件夹是合法操作（Windows 里会生成「xxx - 副本」），
-            // 只有**移动**到原地才是无意义的。
-            if (targetKey.equals(sourceKey) && !copy) {
+            // 只有**移动**到原地才是无意义的。扁平视图里每个条目来自不同目录，
+            // 必须按它自己的父文件夹判断，不能拿当前目录代替。
+            String origin = entry.parentFolderKey != null ? entry.parentFolderKey : sourceKey;
+            if (targetKey.equals(origin) && !copy) {
                 continue;
             }
             valid.add(entry);
@@ -2198,6 +2249,13 @@ public final class FileExplorerController {
         renderedEntryList.clear();
         ExplorerSession.clearClipboard();
         afterMutation();
+        if (filterOpen) {
+            // 权威视图换了，筛选窗格里的候选/创造页标题也要按新视图重读。
+            renderFilterPane();
+            if (filterDialogOpen) {
+                renderFilterDialog();
+            }
+        }
     }
 
     /** 右键拖拽跨窗口落下：在当前窗口弹出“移动到此处/复制到此处”菜单。 */
@@ -2257,7 +2315,7 @@ public final class FileExplorerController {
                 // 跳过拖拽源文件夹及其子树，避免移动到自身内部。
                 boolean selfOrChild = false;
                 for (VirtualFileSystem.Entry de : rightDragEntries) {
-                    if (de.folder && de.childKey != null && entry.childKey.startsWith(de.childKey)) {
+                    if (de.folder && de.childKey != null && fs.isWithin(entry.childKey, de.childKey)) {
                         selfOrChild = true;
                         break;
                     }
@@ -2406,7 +2464,7 @@ public final class FileExplorerController {
                 CtxEntry.action(t("informationera.folder.food"), () -> sendTo(DiskFolder.FOOD_ID, entry)),
                 CtxEntry.action(t("informationera.folder.tools"), () -> sendTo(DiskFolder.TOOLS_ID, entry)),
                 CtxEntry.action(t("informationera.folder.weapons"), () -> sendTo(DiskFolder.WEAPONS_ID, entry)))));
-        if (DiskFolder.RECYCLE_ID.equals(currentKey)) {
+        if (entry.isRecycleEntry() || DiskFolder.RECYCLE_ID.equals(entry.parentFolderKey)) {
             // 回收站里两个动作并存：还原回原位置，或彻底删除（真丢物品）。
             entries.add(CtxEntry.action(t("informationera.fe.restore"), () -> restoreRecycleEntry(entry)));
             entries.add(CtxEntry.actionDanger(t("informationera.fe.permanently_delete"), "Shift+Delete",
@@ -2761,7 +2819,10 @@ public final class FileExplorerController {
         }
         ExplorerSession.clearClipboard();
         for (VirtualFileSystem.Entry entry : selected) {
-            ExplorerSession.clipboard.add(new ExplorerSession.ClipItem(currentKey, entry));
+            // 扁平/子树视图里条目来自不同目录：剪切必须记它真正的父文件夹，
+            // 不能统一记成当前目录，否则粘贴时的原地判断会错。
+            String source = entry.parentFolderKey != null ? entry.parentFolderKey : currentKey;
+            ExplorerSession.clipboard.add(new ExplorerSession.ClipItem(source, entry));
         }
         ExplorerSession.clipboardCut = true;
         setStatus(t("informationera.fe.status_cut", ExplorerSession.clipboard.size()));
@@ -2978,16 +3039,10 @@ public final class FileExplorerController {
         updateStatusBar();
     }
 
-    /** 选中指定分组下的全部条目（含折叠未渲染的条目）。 */
+    /** 选中指定分组下的全部条目（以当前渲染结果为准，含筛选后的条目）。 */
     private void selectGroup(String group) {
         selected.clear();
-        VirtualFileSystem.Folder folder = fs.folder(currentKey);
-        if (folder == null) {
-            updateSelectionVisuals();
-            updateStatusBar();
-            return;
-        }
-        for (VirtualFileSystem.Entry entry : folder.entries) {
+        for (VirtualFileSystem.Entry entry : renderedEntryList) {
             if (group.equals(groupLabel(entry))) {
                 selected.add(entry);
             }
@@ -3103,7 +3158,8 @@ public final class FileExplorerController {
             appendPropertyRow(sb, t("informationera.fe.name"), entry.name);
             appendPropertyRow(sb, t("informationera.fe.type"),
                     entry.folder ? t("informationera.fe.folder") : entry.type);
-            appendPropertyRow(sb, t("informationera.fe.location"), pathText(currentKey));
+            appendPropertyRow(sb, t("informationera.fe.location"),
+                    pathText(entry.parentFolderKey != null ? entry.parentFolderKey : currentKey));
             if (entry.folder) {
                 appendPropertyRow(sb, t("informationera.fe.size"), t("informationera.fe.folder"));
                 appendPropertyRow(sb, t("informationera.fe.contains"), t("informationera.fe.detail_contains", childCount(entry.childKey)));
@@ -3268,6 +3324,12 @@ public final class FileExplorerController {
     private void applyDisplayState(ExplorerDisplayState state) {
         showNav = state.showNav;
         previewOpen = state.showPreview;
+        if (previewOpen) {
+            // 预览和筛选占同一个位置：任何来源打开预览都要收起筛选，避免两个窗格同时出现。
+            // 筛选关闭后内容必须重绘，相关调用点会据此补一次 renderContent。
+            filterOpen = false;
+            closeFilterDialog();
+        }
         detailsPaneOpen = state.showDetails;
         navWidth = state.navWidth;
         previewWidth = state.previewWidth;
@@ -3294,9 +3356,10 @@ public final class FileExplorerController {
      * 读存储里的最新全局设置、只改指定字段，再套用到本窗口并通知其它窗口。
      */
     private void changeDisplay(Consumer<ExplorerDisplayState> mutation, boolean rerenderContent) {
+        boolean filterWasOpen = filterOpen;
         ExplorerDisplayState updated = ExplorerPreferences.updateDisplay(mutation);
         applyDisplayState(updated);
-        applyDisplayVisuals(rerenderContent);
+        applyDisplayVisuals(rerenderContent || (filterWasOpen && !filterOpen));
         notifyOtherWindowsDisplay();
     }
 
@@ -3325,11 +3388,13 @@ public final class FileExplorerController {
 
     /** 其它窗口改了全局显示设置后调用；不回写，避免形成循环。 */
     void reloadDisplayFromPreferences() {
+        boolean filterWasOpen = filterOpen;
         ExplorerDisplayState state = ExplorerPreferences.display();
         boolean contentChanged = state.checkboxes != checkboxes
                 || state.showExtensions != showExtensions
                 || state.compact != compact;
         applyDisplayState(state);
+        contentChanged = contentChanged || (filterWasOpen && !filterOpen);
         applyDisplayVisuals(contentChanged);
     }
 
@@ -3468,7 +3533,8 @@ public final class FileExplorerController {
                 sb.append("<div class=\"fe-details-line\">").append(t("informationera.fe.detail_bytes", entry.size)).append("</div>");
             }
             sb.append("<div class=\"fe-details-line\">").append(t("informationera.fe.detail_modified", escape(entry.modified))).append("</div>");
-            sb.append("<div class=\"fe-details-line\">").append(t("informationera.fe.detail_location", escape(pathText(currentKey)))).append("</div>");
+            sb.append("<div class=\"fe-details-line\">").append(t("informationera.fe.detail_location",
+                    escape(pathText(entry.parentFolderKey != null ? entry.parentFolderKey : currentKey)))).append("</div>");
             sb.append("<div class=\"fe-details-line\">").append(t("informationera.fe.detail_readonly")).append("</div>");
             pane.setInnerHTML(sb.toString());
         } else if (selected.size() > 1) {
@@ -3503,9 +3569,684 @@ public final class FileExplorerController {
         if (pane != null) {
             pane.setInlineStyleProperty("display", previewOpen ? "block" : "none");
         }
+        Element filter = document.getElementById("fe-filter-pane");
+        if (filter != null) {
+            filter.setInlineStyleProperty("display", filterOpen ? "block" : "none");
+        }
         Element resizer = document.getElementById("fe-preview-resizer");
         if (resizer != null) {
-            resizer.setInlineStyleProperty("display", previewOpen ? "block" : "none");
+            resizer.setInlineStyleProperty("display", previewOpen || filterOpen ? "block" : "none");
+        }
+        Element button = document.getElementById("fe-filter");
+        if (button != null) {
+            button.setAttribute("aria-pressed", filterOpen ? "true" : "false");
+            if (filterOpen) {
+                button.getClassList().add("active");
+            } else {
+                button.getClassList().remove("active");
+            }
+        }
+    }
+
+    private void toggleFilter() {
+        filterOpen = !filterOpen;
+        if (!filterOpen) {
+            closeFilterDialog();
+        }
+        if (filterOpen && previewOpen) {
+            // 两个窗格抢同一个位置：打开筛选就收起预览。
+            changeDisplay(state -> state.showPreview = false, false);
+        }
+        applyPreviewVisibility();
+        renderFilterPane();
+        renderContent();
+    }
+
+    /** 筛选窗格：顶部开关 + 三组条件（标签 / 模组 / 创造页）。 */
+    private void renderFilterPane() {
+        Element pane = document.getElementById("fe-filter-pane");
+        if (pane == null) {
+            return;
+        }
+        double scroll = pane.getScrollTop();
+        Element active = document.getActiveElement();
+        ExplorerFilterSelection.Kind focusedKind = active == null
+                ? null : ExplorerFilterSelection.Kind.byKey(active.getAttribute("data-filter-input"));
+        java.util.Map<ExplorerFilterSelection.Kind, String> typed = new java.util.EnumMap<>(ExplorerFilterSelection.Kind.class);
+        for (Element input : pane.querySelectorAll(".fe-filter-input")) {
+            ExplorerFilterSelection.Kind kind = ExplorerFilterSelection.Kind.byKey(input.getAttribute("data-filter-input"));
+            if (kind != null) {
+                typed.put(kind, input.getValue());
+            }
+        }
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("<div class=\"fe-filter-head\">");
+        sb.append("<span class=\"fe-filter-title\">").append(escape(t("informationera.fe.filter"))).append("</span>");
+        sb.append("<button class=\"fe-filter-clear\" id=\"fe-filter-clear\" type=\"button\"")
+          .append(filterSelection.isEmpty() ? " disabled" : "")
+          .append(">").append(escape(t("informationera.fe.filter_clear"))).append("</button>");
+        sb.append("</div>");
+
+        sb.append("<div class=\"fe-filter-switch-row\" id=\"fe-filter-subfolders\" role=\"switch\" aria-checked=\"")
+          .append(filterSelection.includeSubfolders ? "true" : "false").append("\">");
+        sb.append("<span class=\"fe-filter-switch").append(filterSelection.includeSubfolders ? " on" : "")
+          .append("\"><span class=\"fe-filter-switch-knob\"></span></span>");
+        sb.append("<span class=\"fe-filter-switch-label\">")
+          .append(escape(t("informationera.fe.filter_expand_subfolders"))).append("</span>");
+        sb.append("</div>");
+
+        for (ExplorerFilterSelection.Kind kind : ExplorerFilterSelection.Kind.values()) {
+            appendFilterSection(sb, kind);
+        }
+        pane.setInnerHTML(sb.toString());
+
+        for (Element input : pane.querySelectorAll(".fe-filter-input")) {
+            ExplorerFilterSelection.Kind kind = ExplorerFilterSelection.Kind.byKey(input.getAttribute("data-filter-input"));
+            if (kind != null) {
+                input.setValue(typed.getOrDefault(kind, ""));
+            }
+        }
+        pane.setScrollTop(scroll);
+        bindFilterPane();
+        applyFilterVisibilityState();
+        if (!filterDialogOpen && focusedKind != null) {
+            for (Element input : pane.querySelectorAll(".fe-filter-input")) {
+                if (focusedKind.key().equals(input.getAttribute("data-filter-input"))) {
+                    input.focus();
+                    String text = typed.getOrDefault(focusedKind, "");
+                    if (!text.isEmpty()) {
+                        updateFilterSuggestions(focusedKind, text);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    private void appendFilterSection(StringBuilder sb, ExplorerFilterSelection.Kind kind) {
+        String key = escape(kind.key());
+        sb.append("<div class=\"fe-filter-section\" data-filter-section=\"").append(key).append("\">");
+        sb.append("<div class=\"fe-filter-section-head\">");
+        sb.append("<span class=\"fe-filter-section-title\">").append(escape(t(kind.labelKey()))).append("</span>");
+        sb.append("<button class=\"fe-filter-more\" type=\"button\" data-filter-more=\"").append(key)
+          .append("\" aria-label=\"").append(escape(t("informationera.fe.filter_choose")))
+          .append("\">").append(escape(t("informationera.fe.filter_choose"))).append(" ▾</button>");
+        sb.append("</div>");
+        sb.append("<div class=\"fe-filter-chips\" data-filter-chips=\"").append(key).append("\">");
+        java.util.Set<String> selected = filterSelection.values(kind);
+        if (selected.isEmpty()) {
+            sb.append("<span class=\"fe-filter-none\">").append(escape(t("informationera.fe.filter_none")))
+              .append("</span>");
+        } else {
+            for (String value : selected) {
+                sb.append(filterChipHtml(kind, value, true));
+            }
+        }
+        sb.append("</div>");
+        sb.append("<div class=\"fe-filter-input-wrap\">");
+        sb.append("<input class=\"form-input-2 fe-filter-input\" type=\"text\" data-filter-input=\"").append(key)
+          .append("\" placeholder=\"").append(escape(t("informationera.fe.filter_add_placeholder", t(kind.labelKey()))))
+          .append("\">");
+        sb.append("<div class=\"fe-filter-suggest\" data-filter-suggest=\"").append(key)
+          .append("\" style=\"display:none;\"></div>");
+        sb.append("</div></div>");
+    }
+
+    private String filterChipHtml(ExplorerFilterSelection.Kind kind, String value, boolean removable) {
+        String label = ExplorerFilterCatalog.label(kind, value);
+        StringBuilder sb = new StringBuilder();
+        sb.append("<span class=\"fe-filter-chip\" data-chip-kind=\"").append(escape(kind.key()))
+          .append("\" data-chip-value=\"").append(escape(value))
+          .append("\" title=\"").append(escape(value)).append("\">");
+        sb.append("<span class=\"fe-filter-chip-text\">").append(escape(label)).append("</span>");
+        if (removable) {
+            sb.append("<span class=\"fe-filter-chip-x\" role=\"button\" aria-label=\"")
+              .append(escape(t("informationera.fe.filter_remove"))).append("\">×</span>");
+        }
+        sb.append("</span>");
+        return sb.toString();
+    }
+
+    private void bindFilterPane() {
+        Element pane = document.getElementById("fe-filter-pane");
+        if (pane == null) {
+            return;
+        }
+        Element clear = pane.querySelector("#fe-filter-clear");
+        if (clear != null) {
+            clear.addEventListener("click", e -> {
+                e.stopPropagation();
+                clearFilterSelection();
+            });
+        }
+        Element switchRow = pane.querySelector("#fe-filter-subfolders");
+        if (switchRow != null) {
+            switchRow.addEventListener("click", e -> {
+                e.stopPropagation();
+                filterSelection.includeSubfolders = !filterSelection.includeSubfolders;
+                renderFilterPane();
+                renderContent();
+            });
+        }
+        for (Element more : pane.querySelectorAll(".fe-filter-more")) {
+            ExplorerFilterSelection.Kind kind = ExplorerFilterSelection.Kind.byKey(more.getAttribute("data-filter-more"));
+            if (kind != null) {
+                more.addEventListener("click", e -> {
+                    e.stopPropagation();
+                    showFilterDialog(kind);
+                });
+            }
+        }
+        for (Element input : pane.querySelectorAll(".fe-filter-input")) {
+            ExplorerFilterSelection.Kind kind = ExplorerFilterSelection.Kind.byKey(input.getAttribute("data-filter-input"));
+            if (kind == null) {
+                continue;
+            }
+            input.addEventListener("input", e -> updateFilterSuggestions(kind, input.getValue()));
+            input.addEventListener("keyup", e -> {
+                if (e instanceof KeyEvent ke && "Escape".equals(ke.key)) {
+                    return;
+                }
+                updateFilterSuggestions(kind, input.getValue());
+            });
+            input.addEventListener("focus", e -> updateFilterSuggestions(kind, input.getValue()));
+            input.addEventListener("keydown", e -> {
+                e.stopPropagation();
+                if (!(e instanceof KeyEvent ke)) {
+                    return;
+                }
+                if ("Enter".equals(ke.key)) {
+                    submitFilterInput(kind, input);
+                } else if ("Escape".equals(ke.key)) {
+                    showFilterSuggestions(kind, List.of());
+                }
+            });
+        }
+        for (Element chip : pane.querySelectorAll(".fe-filter-chip")) {
+            chip.addEventListener("click", e -> {
+                e.stopPropagation();
+                ExplorerFilterSelection.Kind kind = ExplorerFilterSelection.Kind.byKey(chip.getAttribute("data-chip-kind"));
+                String value = chip.getAttribute("data-chip-value");
+                if (kind != null && value != null) {
+                    removeFilterValue(kind, value);
+                }
+            });
+        }
+    }
+
+    private void clearFilterSelection() {
+        if (filterSelection.isEmpty()) {
+            return;
+        }
+        filterSelection.clear();
+        refreshFilterViews();
+    }
+
+    private void addFilterValue(ExplorerFilterSelection.Kind kind, String rawValue) {
+        if (rawValue != null) {
+            addFilterValues(kind, List.of(rawValue));
+        }
+    }
+
+    /** 一次加入多个值；去重后只在真的新增了条件时刷新界面。 */
+    private void addFilterValues(ExplorerFilterSelection.Kind kind, List<String> rawValues) {
+        if (kind == null || rawValues == null || rawValues.isEmpty()) {
+            return;
+        }
+        boolean changed = false;
+        for (String rawValue : rawValues) {
+            String value = ExplorerFilterSelection.normalize(rawValue);
+            if (value == null) {
+                continue;
+            }
+            if (filterSelection.add(kind, value)) {
+                ExplorerPreferences.recordFilterUse(kind.key(), value);
+                changed = true;
+            }
+        }
+        if (changed) {
+            refreshFilterViews();
+        }
+    }
+
+    private void removeFilterValue(ExplorerFilterSelection.Kind kind, String rawValue) {
+        if (kind == null || !filterSelection.remove(kind, rawValue)) {
+            return;
+        }
+        refreshFilterViews();
+    }
+
+    /** 条件变化后同时刷新窗格、弹窗和内容区；界面上的排序/分组/虚拟滚动全部沿用。 */
+    private void refreshFilterViews() {
+        renderFilterPane();
+        if (filterDialogOpen) {
+            renderFilterDialog();
+        }
+        renderContent();
+    }
+
+    /** 标签/创造页数据同步后，筛选窗格和候选重新读取；未打开筛选的窗口不需要动作。 */
+    void onFilterDataChanged() {
+        if (!filterOpen || document == null) {
+            return;
+        }
+        invalidateFilterCandidates();
+        renderFilterPane();
+        if (filterDialogOpen) {
+            renderFilterDialog();
+        }
+        renderContent();
+    }
+
+    private void updateFilterSuggestions(ExplorerFilterSelection.Kind kind, String rawQuery) {
+        List<String> suggestions = filterSuggestions(kind, rawQuery, 8);
+        showFilterSuggestions(kind, suggestions);
+    }
+
+    private void showFilterSuggestions(ExplorerFilterSelection.Kind kind, List<String> suggestions) {
+        Element pane = document.getElementById("fe-filter-pane");
+        if (pane == null) {
+            return;
+        }
+        Element box = null;
+        for (Element candidate : pane.querySelectorAll(".fe-filter-suggest")) {
+            if (kind.key().equals(candidate.getAttribute("data-filter-suggest"))) {
+                box = candidate;
+                break;
+            }
+        }
+        if (box == null) {
+            return;
+        }
+        if (suggestions.isEmpty()) {
+            box.setInnerHTML("");
+            box.setInlineStyleProperty("display", "none");
+            return;
+        }
+        box.setInlineStyleProperty("display", "flex");
+        StringBuilder sb = new StringBuilder();
+        for (String value : suggestions) {
+            sb.append("<button class=\"fe-filter-suggestion\" type=\"button\" data-suggest-kind=\"")
+              .append(escape(kind.key())).append("\" data-suggest-value=\"").append(escape(value))
+              .append("\" title=\"").append(escape(value)).append("\">")
+              .append(escape(ExplorerFilterCatalog.label(kind, value))).append("</button>");
+        }
+        box.setInnerHTML(sb.toString());
+        Element input = paneFilterInput(kind);
+        for (Element button : box.querySelectorAll(".fe-filter-suggestion")) {
+            button.addEventListener("mousedown", e -> e.preventDefault());
+            button.addEventListener("click", e -> {
+                e.stopPropagation();
+                String value = button.getAttribute("data-suggest-value");
+                if (value != null) {
+                    if (input != null) {
+                        input.setValue("");
+                    }
+                    addFilterValue(kind, value);
+                }
+            });
+        }
+    }
+
+    private Element paneFilterInput(ExplorerFilterSelection.Kind kind) {
+        Element pane = document.getElementById("fe-filter-pane");
+        if (pane == null || kind == null) {
+            return null;
+        }
+        for (Element input : pane.querySelectorAll(".fe-filter-input")) {
+            if (kind.key().equals(input.getAttribute("data-filter-input"))) {
+                return input;
+            }
+        }
+        return null;
+    }
+
+    private void submitFilterInput(ExplorerFilterSelection.Kind kind, Element input) {
+        String text = input == null ? "" : input.getValue();
+        List<String> values = resolveFilterValues(kind, text);
+        if (values.isEmpty()) {
+            return;
+        }
+        input.setValue("");
+        addFilterValues(kind, values);
+    }
+
+    /**
+     * 把输入文本解析成一组条件值。整段文本能匹配原值或本地化标题时只加一个；
+     * 否则按逗号拆开逐项解析，让「id1, id2」一次回车就能加多个条件。
+     * 单值解析仍保留原始文本作为兜底，允许玩家手动输入当前范围里暂时没有的 id。
+     */
+    private List<String> resolveFilterValues(ExplorerFilterSelection.Kind kind, String rawText) {
+        String text = ExplorerFilterSelection.normalize(rawText);
+        if (text == null || kind == null) {
+            return List.of();
+        }
+        String exact = resolveKnownFilterValue(kind, text);
+        if (exact != null) {
+            return List.of(exact);
+        }
+        if (text.indexOf(',') >= 0 || text.indexOf('，') >= 0) {
+            java.util.LinkedHashSet<String> values = new java.util.LinkedHashSet<>();
+            for (String part : text.split("[,，]")) {
+                String piece = ExplorerFilterSelection.normalize(part);
+                if (piece == null) {
+                    continue;
+                }
+                String resolved = resolveKnownFilterValue(kind, piece);
+                values.add(resolved == null ? piece : resolved);
+            }
+            if (!values.isEmpty()) {
+                return new ArrayList<>(values);
+            }
+        }
+        List<String> suggestions = filterSuggestions(kind, text, 1);
+        return List.of(suggestions.isEmpty() ? text : suggestions.get(0));
+    }
+
+    /** 输入文本对应已加载候选里的原值或本地化标题；没有精确命中时返回 null。 */
+    private String resolveKnownFilterValue(ExplorerFilterSelection.Kind kind, String text) {
+        for (String candidate : filterCandidates(kind)) {
+            if (candidate.equalsIgnoreCase(text)) {
+                return candidate;
+            }
+        }
+        for (String candidate : filterCandidates(kind)) {
+            if (ExplorerFilterCatalog.label(kind, candidate).equalsIgnoreCase(text)) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    private List<String> filterSuggestions(ExplorerFilterSelection.Kind kind, String rawQuery, int limit) {
+        String query = rawQuery == null ? "" : rawQuery.trim();
+        List<String> result = new ArrayList<>();
+        if (query.isEmpty() || limit <= 0) {
+            return result;
+        }
+        for (String value : filterCandidates(kind)) {
+            String label = ExplorerFilterCatalog.label(kind, value);
+            if (ExplorerSearch.matches(value, query) || ExplorerSearch.matches(label, query)) {
+                result.add(value);
+                if (result.size() >= limit) {
+                    break;
+                }
+            }
+        }
+        return result;
+    }
+
+    private List<String> filterCandidates(ExplorerFilterSelection.Kind kind) {
+        if (kind == null) {
+            return List.of();
+        }
+        List<String> cached = filterCandidateCache.get(kind);
+        if (cached != null) {
+            return cached;
+        }
+        List<String> computed = ExplorerFilterCatalog.candidates(
+                filterScopeEntries(filterOpen && filterSelection.includeSubfolders), kind);
+        filterCandidateCache.put(kind, computed);
+        return computed;
+    }
+
+    private void invalidateFilterCandidates() {
+        filterCandidateCache.clear();
+    }
+
+    // ---------- 筛选条件弹窗 ----------
+
+    private void showFilterDialog(ExplorerFilterSelection.Kind kind) {
+        Element dialog = document.getElementById("fe-filter-dialog");
+        Element overlay = document.getElementById("fe-filter-dialog-overlay");
+        if (dialog == null || overlay == null || kind == null) {
+            return;
+        }
+        hideTooltip();
+        closeContextMenu();
+        filterDialogKind = kind;
+        filterDialogOpen = true;
+        Element title = document.getElementById("fe-filter-dialog-title");
+        if (title != null) {
+            title.setTextContent(t("informationera.fe.filter_dialog_title", t(kind.labelKey())));
+        }
+        renderFilterDialog();
+        Element dialogBody = document.getElementById("fe-filter-dialog-body");
+        if (dialogBody != null) {
+            dialogBody.setScrollTop(0);
+        }
+        Size viewport = document.getViewportSize();
+        double width = 560;
+        double height = Math.min(620, Math.max(280, viewport.height() - 120));
+        double left = Math.max(8, (viewport.width() - width) / 2);
+        double top = Math.max(8, (viewport.height() - height) / 2);
+        dialog.setInlineStyleProperty("left", px(left));
+        dialog.setInlineStyleProperty("top", px(top));
+        dialog.setInlineStyleProperty("height", px(height));
+        dialog.setInlineStyleProperty("display", "flex");
+        overlay.setInlineStyleProperty("display", "block");
+        Element search = document.getElementById("fe-filter-dialog-search");
+        if (search != null) {
+            search.focus();
+        }
+    }
+
+    private void renderFilterDialog() {
+        Element body = document.getElementById("fe-filter-dialog-body");
+        if (body == null || !filterDialogOpen) {
+            return;
+        }
+        ExplorerFilterSelection.Kind kind = filterDialogKind;
+        String typed = "";
+        Element oldSearch = document.getElementById("fe-filter-dialog-search");
+        if (oldSearch != null) {
+            typed = oldSearch.getValue();
+        }
+        double scroll = body.getScrollTop();
+        StringBuilder sb = new StringBuilder();
+
+        sb.append("<div class=\"fe-filter-dialog-search-wrap\">");
+        sb.append("<input class=\"form-input-2 fe-filter-input\" id=\"fe-filter-dialog-search\" type=\"text\" placeholder=\"")
+          .append(escape(t("informationera.fe.filter_search_placeholder", t(kind.labelKey())))).append("\">");
+        sb.append("<div class=\"fe-filter-suggest fe-filter-dialog-suggest\" id=\"fe-filter-dialog-suggest\" style=\"display:none;\"></div>");
+        sb.append("</div>");
+
+        sb.append("<div class=\"fe-filter-dialog-section\">");
+        sb.append("<div class=\"fe-filter-dialog-head\">").append(escape(t("informationera.fe.filter_selected")))
+          .append("</div>");
+        java.util.Set<String> selected = filterSelection.values(kind);
+        sb.append("<div class=\"fe-filter-chips\">");
+        if (selected.isEmpty()) {
+            sb.append("<span class=\"fe-filter-none\">").append(escape(t("informationera.fe.filter_none")))
+              .append("</span>");
+        } else {
+            for (String value : selected) {
+                sb.append(filterChipHtml(kind, value, true));
+            }
+        }
+        sb.append("</div></div>");
+
+        sb.append(filterHistoryRow(t("informationera.fe.filter_frequent"),
+                ExplorerPreferences.frequentFilterValues(kind.key(), 8)));
+        sb.append(filterHistoryRow(t("informationera.fe.filter_recent"),
+                ExplorerPreferences.recentFilterValues(kind.key(), 8)));
+
+        List<String> candidates = filterCandidates(kind);
+        sb.append("<div class=\"fe-filter-dialog-section fe-filter-dialog-candidates\">");
+        sb.append("<div class=\"fe-filter-dialog-head\">").append(escape(t("informationera.fe.filter_candidates")))
+          .append("<span class=\"fe-filter-count\">").append(candidates.size()).append("</span></div>");
+        sb.append("<div class=\"fe-filter-value-list\">");
+        if (candidates.isEmpty()) {
+            sb.append("<span class=\"fe-filter-none\">").append(escape(t("informationera.fe.filter_no_candidates")))
+              .append("</span>");
+        } else {
+            for (String value : candidates) {
+                sb.append("<button class=\"fe-filter-value\" type=\"button\" data-filter-value=\"")
+                  .append(escape(value)).append("\" title=\"").append(escape(value)).append("\">")
+                  .append(escape(ExplorerFilterCatalog.label(kind, value)))
+                  .append(selected.contains(value) ? "<span class=\"fe-filter-check\">✓</span>" : "")
+                  .append("</button>");
+            }
+        }
+        sb.append("</div></div>");
+        body.setInnerHTML(sb.toString());
+        body.setScrollTop(scroll);
+
+        Element search = document.getElementById("fe-filter-dialog-search");
+        if (search != null) {
+            search.setValue(typed);
+            search.addEventListener("input", e -> renderFilterDialogSuggestions(search.getValue()));
+            search.addEventListener("keyup", e -> {
+                if (e instanceof KeyEvent ke && "Escape".equals(ke.key)) {
+                    return;
+                }
+                renderFilterDialogSuggestions(search.getValue());
+            });
+            search.addEventListener("keydown", e -> {
+                e.stopPropagation();
+                if (!(e instanceof KeyEvent ke)) {
+                    return;
+                }
+                if ("Enter".equals(ke.key)) {
+                    List<String> values = resolveFilterValues(kind, search.getValue());
+                    if (!values.isEmpty()) {
+                        // 先清空再重绘，添加后可以继续输入下一个条件。
+                        search.setValue("");
+                        addFilterValues(kind, values);
+                    }
+                } else if ("Escape".equals(ke.key)) {
+                    Element suggest = document.getElementById("fe-filter-dialog-suggest");
+                    boolean showing = suggest != null && suggest.querySelector(".fe-filter-suggestion") != null;
+                    if (showing) {
+                        renderFilterDialogSuggestions("");
+                    } else {
+                        closeFilterDialog();
+                    }
+                }
+            });
+            if (!typed.isEmpty() && filterDialogOpen) {
+                renderFilterDialogSuggestions(typed);
+            }
+            if (filterDialogOpen) {
+                // 添加/移除条件会整体重绘弹窗，焦点必须回到搜索框，才能连续输入多个条件。
+                search.focus();
+            }
+        }
+        for (Element chip : body.querySelectorAll(".fe-filter-chip")) {
+            chip.addEventListener("click", e -> {
+                e.stopPropagation();
+                String value = chip.getAttribute("data-chip-value");
+                if (value != null) {
+                    removeFilterValue(kind, value);
+                }
+            });
+        }
+        for (Element valueButton : body.querySelectorAll(".fe-filter-value")) {
+            valueButton.addEventListener("click", e -> {
+                e.stopPropagation();
+                String value = valueButton.getAttribute("data-filter-value");
+                if (value != null) {
+                    addFilterValue(kind, value);
+                }
+            });
+        }
+        for (Element historyButton : body.querySelectorAll(".fe-filter-history-value")) {
+            historyButton.addEventListener("click", e -> {
+                e.stopPropagation();
+                String value = historyButton.getAttribute("data-filter-history-value");
+                if (value != null) {
+                    addFilterValue(kind, value);
+                }
+            });
+        }
+    }
+
+    private String filterHistoryRow(String title, List<String> values) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("<div class=\"fe-filter-dialog-section\">");
+        sb.append("<div class=\"fe-filter-dialog-head\">").append(escape(title)).append("</div>");
+        sb.append("<div class=\"fe-filter-history-row\">");
+        if (values.isEmpty()) {
+            sb.append("<span class=\"fe-filter-none\">").append(escape(t("informationera.fe.filter_none")))
+              .append("</span>");
+        } else {
+            ExplorerFilterSelection.Kind kind = filterDialogKind;
+            for (String value : values) {
+                String label = ExplorerFilterCatalog.label(kind, value);
+                sb.append("<button class=\"fe-filter-history-value\" type=\"button\" data-filter-history-value=\"")
+                  .append(escape(value)).append("\" title=\"").append(escape(value)).append("\">")
+                  .append(escape(label)).append("</button>");
+            }
+        }
+        sb.append("</div></div>");
+        return sb.toString();
+    }
+
+    private void renderFilterDialogSuggestions(String rawQuery) {
+        Element box = document.getElementById("fe-filter-dialog-suggest");
+        if (box == null) {
+            return;
+        }
+        List<String> suggestions = filterSuggestions(filterDialogKind, rawQuery, 10);
+        if (suggestions.isEmpty()) {
+            box.setInnerHTML("");
+            box.setInlineStyleProperty("display", "none");
+            return;
+        }
+        box.setInlineStyleProperty("display", "flex");
+        StringBuilder sb = new StringBuilder();
+        for (String value : suggestions) {
+            sb.append("<button class=\"fe-filter-suggestion\" type=\"button\" data-suggest-value=\"")
+              .append(escape(value)).append("\" title=\"").append(escape(value)).append("\">")
+              .append(escape(ExplorerFilterCatalog.label(filterDialogKind, value))).append("</button>");
+        }
+        box.setInnerHTML(sb.toString());
+        for (Element button : box.querySelectorAll(".fe-filter-suggestion")) {
+            button.addEventListener("mousedown", e -> e.preventDefault());
+            button.addEventListener("click", e -> {
+                e.stopPropagation();
+                String value = button.getAttribute("data-suggest-value");
+                if (value != null) {
+                    Element search = document.getElementById("fe-filter-dialog-search");
+                    if (search != null) {
+                        search.setValue("");
+                    }
+                    addFilterValue(filterDialogKind, value);
+                }
+            });
+        }
+    }
+
+    private void closeFilterDialog() {
+        filterDialogOpen = false;
+        if (document == null) {
+            return;
+        }
+        Element dialog = document.getElementById("fe-filter-dialog");
+        Element overlay = document.getElementById("fe-filter-dialog-overlay");
+        if (dialog != null) {
+            dialog.setInlineStyleProperty("display", "none");
+        }
+        if (overlay != null) {
+            overlay.setInlineStyleProperty("display", "none");
+        }
+        Element search = document.getElementById("fe-filter-dialog-search");
+        if (search != null) {
+            search.setValue("");
+        }
+    }
+
+    private void applyFilterVisibilityState() {
+        Element button = document.getElementById("fe-filter");
+        if (button != null) {
+            boolean active = filterOpen;
+            button.setAttribute("aria-pressed", active ? "true" : "false");
+            if (active) {
+                button.getClassList().add("active");
+            } else {
+                button.getClassList().remove("active");
+            }
         }
     }
 
@@ -3965,15 +4706,25 @@ public final class FileExplorerController {
         List<VirtualFileSystem.Entry> entries = topLevelEntries();
         renderedEntryList.clear();
         renderedEntryList.addAll(entries);
+        invalidateFilterCandidates();
         lastClickedIndex = -1;
 
         if (entries.isEmpty()) {
+            boolean filtering = filterOpen && !filterSelection.isEmpty();
             if (!searchQuery.trim().isEmpty()) {
                 content.setInnerHTML("<div class=\"fe-empty\">" + t("informationera.fe.no_match")
                         + "<button class=\"fe-empty-search-btn\" id=\"fe-subfolder-search\">" + t("informationera.fe.search_subfolders") + "</button></div>");
                 Element btn = content.querySelector("#fe-subfolder-search");
                 if (btn != null) {
                     btn.addEventListener("click", e -> searchSubfolders());
+                }
+            } else if (filtering) {
+                content.setInnerHTML("<div class=\"fe-empty\">" + t("informationera.fe.no_filter_match")
+                        + "<button class=\"fe-empty-search-btn\" id=\"fe-filter-empty-clear\">"
+                        + t("informationera.fe.filter_clear") + "</button></div>");
+                Element btn = content.querySelector("#fe-filter-empty-clear");
+                if (btn != null) {
+                    btn.addEventListener("click", e -> clearFilterSelection());
                 }
             } else {
                 content.setInnerHTML("<div class=\"fe-empty\">" + t("informationera.fe.empty_folder") + "</div>");
@@ -4262,7 +5013,9 @@ public final class FileExplorerController {
         double newTop = content.getScrollTop();
         if (Math.abs(newTop - scrollTop) > 1.0) {
             scrollTop = newTop;
-            List<VirtualFileSystem.Entry> entries = topLevelEntries();
+            // 用当前渲染结果，不再重新扫描子树/重算筛选；否则滚动时既卡又可能和
+            // 筛选条件、搜索词产生不一致的列表。
+            List<VirtualFileSystem.Entry> entries = renderedEntryList;
             if (entries.size() > 200) {
                 if (isLinearView()) {
                     renderContentVirtual(entries);
@@ -4279,8 +5032,9 @@ public final class FileExplorerController {
 
     /** 递归收集当前文件夹子树内匹配 query 的文件（含所在文件夹 key）。 */
     private void collectRecursiveMatches(String folderKey, String query, int depth,
-                                         List<VirtualFileSystem.Entry> files, List<String> fileFolders) {
-        if (depth > 12) {
+                                         List<VirtualFileSystem.Entry> files, List<String> fileFolders,
+                                         Set<String> visited) {
+        if (depth > MAX_FILTER_DEPTH || folderKey == null || !visited.add(folderKey)) {
             return;
         }
         VirtualFileSystem.Folder folder = fs.folder(folderKey);
@@ -4289,7 +5043,10 @@ public final class FileExplorerController {
         }
         for (VirtualFileSystem.Entry entry : folder.entries) {
             if (entry.folder && entry.childKey != null) {
-                collectRecursiveMatches(entry.childKey, query, depth + 1, files, fileFolders);
+                if (DiskFolder.RECYCLE_ID.equals(entry.childKey) && !DiskFolder.RECYCLE_ID.equals(currentKey)) {
+                    continue;
+                }
+                collectRecursiveMatches(entry.childKey, query, depth + 1, files, fileFolders, visited);
             } else if (ExplorerSearch.matches(entry.name, query)) {
                 files.add(entry);
                 fileFolders.add(folderKey);
@@ -4305,7 +5062,7 @@ public final class FileExplorerController {
         }
         List<VirtualFileSystem.Entry> files = new ArrayList<>();
         List<String> fileFolders = new ArrayList<>();
-        collectRecursiveMatches(currentKey, query, 0, files, fileFolders);
+        collectRecursiveMatches(currentKey, query, 0, files, fileFolders, new HashSet<>());
         if (files.isEmpty()) {
             setStatus(t("informationera.fe.status_no_subfolder_match"));
             return;
@@ -4321,16 +5078,16 @@ public final class FileExplorerController {
     }
 
     private List<VirtualFileSystem.Entry> topLevelEntries() {
-        List<VirtualFileSystem.Entry> entries = new ArrayList<>();
-        VirtualFileSystem.Folder folder = fs.folder(currentKey);
-        if (folder == null) {
-            return entries;
-        }
+        // 筛选关闭时，隐藏的条件不参与显示：includeSubfolders 也不展开。
+        boolean expand = filterOpen && filterSelection.includeSubfolders;
+        List<VirtualFileSystem.Entry> entries = filterScopeEntries(expand);
         String query = searchQuery == null ? "" : searchQuery.trim();
-        for (VirtualFileSystem.Entry entry : folder.entries) {
-            if (query.isEmpty() || ExplorerSearch.matches(entry.name, query)) {
-                entries.add(entry);
-            }
+        if (!query.isEmpty()) {
+            entries.removeIf(entry -> !ExplorerSearch.matches(entry.name, query));
+        }
+        if (filterOpen && !filterSelection.isEmpty()) {
+            // 有任意条件时只保留满足条件的物品；文件夹没有标签/模组/创造页，自然被排除。
+            entries.removeIf(entry -> entry.folder || !matchesFilter(entry));
         }
         // 有分组时先确定组顺序，再让每组复用当前列排序（包括第三方列），
         // 不能再用名称排序覆盖表头的排序选择。
@@ -4351,6 +5108,59 @@ public final class FileExplorerController {
             sortEntries(entries);
         }
         return entries;
+    }
+
+    private boolean matchesFilter(VirtualFileSystem.Entry entry) {
+        ExplorerFilterCatalog.Facts facts = ExplorerFilterCatalog.facts(entry);
+        return filterSelection.matches(facts.modId, facts.tags, facts.tabs);
+    }
+
+    /**
+     * 当前目录的范围：普通模式下只有当前文件夹的直接子项；“展开所有子文件夹”时收集
+     * 当前目录及整个子树的文件（物品）。候选全集和实际显示都从这里取，保证已选条件
+     * 不会反过来缩小候选范围。
+     */
+    private List<VirtualFileSystem.Entry> filterScopeEntries(boolean includeSubfolders) {
+        List<VirtualFileSystem.Entry> entries = new ArrayList<>();
+        VirtualFileSystem.Folder folder = fs.folder(currentKey);
+        if (folder == null) {
+            return entries;
+        }
+        if (!includeSubfolders) {
+            entries.addAll(folder.entries);
+            return entries;
+        }
+        collectFilterSubtree(currentKey, entries, new HashSet<>(), 0);
+        return entries;
+    }
+
+    /**
+     * 递归收集子树文件。
+     *
+     * <p>visited + 深度上限保证异常/循环的父链不会把界面拖死；回收站子树默认跳过，
+     * 只有当前目录本身就是回收站时才遍历它——否则回收站里的物品会从普通目录的筛选里冒出来。
+     */
+    private void collectFilterSubtree(String folderKey, List<VirtualFileSystem.Entry> out,
+                                      Set<String> visited, int depth) {
+        if (depth > MAX_FILTER_DEPTH || folderKey == null || !visited.add(folderKey)) {
+            return;
+        }
+        VirtualFileSystem.Folder folder = fs.folder(folderKey);
+        if (folder == null) {
+            return;
+        }
+        boolean inRecycle = DiskFolder.RECYCLE_ID.equals(currentKey);
+        for (VirtualFileSystem.Entry entry : folder.entries) {
+            if (entry.folder) {
+                String child = entry.childKey != null ? entry.childKey : entry.id;
+                if (DiskFolder.RECYCLE_ID.equals(child) && !inRecycle) {
+                    continue;
+                }
+                collectFilterSubtree(child, out, visited, depth + 1);
+            } else {
+                out.add(entry);
+            }
+        }
     }
 
     private String displayName(VirtualFileSystem.Entry entry) {
@@ -5567,8 +6377,12 @@ public final class FileExplorerController {
         if (entry == null || tooltip == null) {
             return;
         }
-        String location = !entry.folder && !searchQuery.isBlank()
-                ? t("informationera.fe.detail_location", pathText(currentKey) + " > " + entry.name) : null;
+        boolean elsewhere = entry.parentFolderKey != null && !entry.parentFolderKey.equals(currentKey);
+        boolean flattened = filterOpen && filterSelection.includeSubfolders;
+        String location = !entry.folder && (elsewhere || flattened || !searchQuery.isBlank())
+                ? t("informationera.fe.detail_location",
+                pathText(entry.parentFolderKey != null ? entry.parentFolderKey : currentKey) + " > " + entry.name)
+                : null;
         if (!entry.folder) {
             ItemStack stack = stackForEntry(entry);
             if (!stack.isEmpty()) {
@@ -5817,8 +6631,9 @@ public final class FileExplorerController {
 
     private String pathText(String key) {
         Deque<String> names = new ArrayDeque<>();
+        Set<String> visited = new HashSet<>();
         VirtualFileSystem.Folder folder = fs.folder(key);
-        while (folder != null) {
+        while (folder != null && visited.add(folder.key)) {
             names.addFirst(folder.name);
             folder = folder.parentKey == null ? null : fs.folder(folder.parentKey);
         }
@@ -5832,7 +6647,8 @@ public final class FileExplorerController {
     }
 
     private void copyPath(VirtualFileSystem.Entry entry) {
-        String path = pathText(currentKey) + " > " + entry.name;
+        String parent = entry.parentFolderKey != null ? entry.parentFolderKey : currentKey;
+        String path = pathText(parent) + " > " + entry.name;
         Minecraft.getInstance().keyboardHandler.setClipboard(path);
         setStatus(t("informationera.fe.status_path_copied", path));
     }

@@ -83,6 +83,15 @@ public final class ExplorerPreferences {
             .defineListAllowEmpty("viewState", new ArrayList<String>(), () -> "", ExplorerPreferences::isValidEntry);
 
     /**
+     * 筛选条件的使用历史，一行一条 {@code kind|value|uses|lastAccessMillis}。
+     *
+     * <p>标签、模组、创造模式标签页三类共用一张表，历史全存档通用，不按玩家/磁盘隔离。
+     */
+    private static final ModConfigSpec.ConfigValue<List<? extends String>> FILTER_USAGE = BUILDER
+            .comment("Explorer filter usage history: kind|value|uses|lastAccessMillis. Shared by all worlds.")
+            .defineListAllowEmpty("filterUsage", new ArrayList<String>(), () -> "", ExplorerPreferences::isValidEntry);
+
+    /**
      * 「常用文件夹」的条数上限。
      *
      * <p>固定四条：这一段的定位就是「最常用的那几个入口」，再多就退化成目录列表了。
@@ -115,6 +124,8 @@ public final class ExplorerPreferences {
 
     /** 显示偏好的内存存储；每个身份、每个文件夹各一条，修改时只动目标记录。 */
     private static ExplorerViewStore viewStore = new ExplorerViewStore();
+    /** 筛选条件的使用历史（标签/模组/创造页共用），全存档通用。 */
+    private static ExplorerFilterHistory filterHistory = new ExplorerFilterHistory();
     /** 是否有尚未落盘的显示偏好修改。 */
     private static boolean viewDirty;
     /** 最近一次显示偏好修改的时间，用于延迟合并写盘。 */
@@ -189,10 +200,12 @@ public final class ExplorerPreferences {
             migrate = !loadedDestinations.isEmpty();
         }
         ExplorerViewStore loadedViews = ExplorerViewStore.decode(VIEW_STATE.get());
-        // 两次读取都成功，才覆盖内存镜像。显示偏好若还有未落盘的修改，以内存为准，
+        ExplorerFilterHistory loadedFilters = ExplorerFilterHistory.decode(FILTER_USAGE.get());
+        // 全部读取都成功，才覆盖内存镜像。显示偏好若还有未落盘的修改，以内存为准，
         // 避免外部重载把玩家刚做的调整吞掉。
         destinations.clear();
         destinations.addAll(loadedDestinations);
+        filterHistory = loadedFilters;
         if (!viewDirty) {
             viewStore = loadedViews;
         }
@@ -362,6 +375,7 @@ public final class ExplorerPreferences {
             raw.add(encode(destination));
         }
         DESTINATIONS.set(raw);
+        FILTER_USAGE.set(filterHistory.encode());
         if (viewDirty) {
             VIEW_STATE.set(viewStore.encode());
         }
@@ -487,6 +501,35 @@ public final class ExplorerPreferences {
         if (changed) {
             persist();
         }
+    }
+
+    // ------------------------------------------------------------ 筛选历史
+
+    /**
+     * 记录一次筛选条件的使用。
+     *
+     * <p>筛选历史全存档通用：它描述的是玩家习惯（常用哪些标签/模组/创造页），
+     * 与当前世界或磁盘无关，因此不像文件夹视图那样按玩家和磁盘分片。
+     */
+    public static void recordFilterUse(String kind, String value) {
+        if (kind == null || kind.isBlank() || value == null || value.isBlank()) {
+            return;
+        }
+        ensureLoaded();
+        filterHistory.record(kind, value, System.currentTimeMillis());
+        persist();
+    }
+
+    /** 某类筛选条件的高频值，按使用次数降序。 */
+    public static List<String> frequentFilterValues(String kind, int limit) {
+        ensureLoaded();
+        return filterHistory.top(kind, limit);
+    }
+
+    /** 某类筛选条件的最近值，按最后使用时间降序。 */
+    public static List<String> recentFilterValues(String kind, int limit) {
+        ensureLoaded();
+        return filterHistory.recent(kind, limit);
     }
 
     // ------------------------------------------- 显示偏好（玩家 / 磁盘两级作用域）

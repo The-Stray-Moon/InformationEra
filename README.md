@@ -11,6 +11,8 @@ A Minecraft mod about the Information Era.
 
 Information Era 将玩家库存组织成文件与文件夹。资源管理器、存储卡及游戏内存取目前主要实现在 NeoForge 1.21.1；其他 target 是开发入口，不代表功能已移植。详见[产品设计](docs/PRODUCT_DESIGN.md)。
 
+资源管理器的筛选窗格与预览窗格互斥，占用同一个右侧位置。筛选支持按物品标签、模组 id、创造模式标签页复合过滤：同类条件取并集，不同类之间取交集，并与顶部搜索框同时生效。“展开所有子文件夹”会在当前目录中平铺显示整棵子树的物品，但条目的真实位置不变，右键菜单、路径、属性与拖拽仍按实际父文件夹操作。三类条件都支持多值 chip、自动补全、回车提交和弹窗选择；弹窗依次展示模糊搜索、已选条件、高频使用、最近使用与当前目录候选，使用历史全存档通用，保存在 `config/informationera-client.toml`。
+
 构建框架基线：[SighsTemple `73d8e5e`](https://github.com/Tower-of-Sighs/SighsTemple/commit/73d8e5e68694cb7a5c3a1f5ef6208176b4f36ffc)。
 
 以下矩阵在初始化时从实际 target 目录及 `ci.properties` 生成。CI 启用仅表示会参与验证，不等于已验证支持；后续增删版本或改变工具链时同步维护本表。
