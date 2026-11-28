@@ -10,6 +10,13 @@ java {
     toolchain.languageVersion = JavaLanguageVersion.of(21)
 }
 
+// The public column API and its tests reference Minecraft/NeoForge client types.
+// Keep the test source set on the same compile/runtime classpath as the mod.
+sourceSets.test {
+    compileClasspath += sourceSets.main.compileClasspath
+    runtimeClasspath += sourceSets.main.runtimeClasspath
+}
+
 commonJava {
     // Exclude only common files with confirmed differences for this target.
 }

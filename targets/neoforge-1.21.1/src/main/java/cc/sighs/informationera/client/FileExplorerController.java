@@ -1,5 +1,7 @@
 package cc.sighs.informationera.client;
 
+import cc.sighs.informationera.api.client.ExplorerColumn;
+import cc.sighs.informationera.api.client.ExplorerColumnContext;
 import cc.sighs.informationera.util.ItemStacks;
 import com.sighs.apricityui.element.Item;
 import com.sighs.apricityui.event.Event;
@@ -60,13 +62,7 @@ public final class FileExplorerController {
      */
     private static final double RENAME_MIN_HEIGHT = 28.0;
 
-    private static final String[] COL_FIELDS = ExplorerViewState.COLUMN_FIELDS;
-
-    private static String[] columnLabels() {
-        return new String[]{t("informationera.fe.name"), t("informationera.fe.modified"),
-                t("informationera.fe.type"), t("informationera.fe.size"),
-                t("informationera.fe.created"), t("informationera.fe.author")};
-    }
+    private static final String NAME_COLUMN_ID = ExplorerViewState.NAME_COLUMN_ID;
 
     private static FileExplorerController ACTIVE;
 
@@ -130,8 +126,15 @@ public final class FileExplorerController {
     private final Set<String> expandedSidebar = new HashSet<>(Set.of(DiskFolder.HOST_ID));
     // 「固定到快速访问」的状态存在客户端配置里（ExplorerPreferences），不放在窗口实例上——
     // 否则关掉窗口、重启客户端就全丢了。
-    private final List<Double> columnWidths = new ArrayList<>(List.of(320.0, 160.0, 120.0, 100.0, 140.0, 100.0));
-    private final boolean[] columnVisible = new boolean[]{true, true, true, true, false, false};
+    /** 当前列设置（稳定命名空间 ID -> 宽度/显隐）。 */
+    private final java.util.Map<String, ExplorerViewState.ColumnSetting> columnSettings = new java.util.LinkedHashMap<>();
+    /** 当前列序（稳定命名空间 ID）；隐藏列与暂未注册的 ID 也保留。 */
+    private final List<String> columnOrder = new ArrayList<>();
+    /** 列选择对话框的临时草稿；取消时不影响已保存状态。 */
+    private final List<ColumnDraft> columnDrafts = new ArrayList<>();
+    /** 打开对话框时的快照：确定时只写用户实际改过的列，避免覆盖其它窗口的修改。 */
+    private ExplorerViewState columnManagerBase;
+    private boolean columnManagerOpen;
 
     private String viewMode = "details";
     private int iconSize = 40;
@@ -181,7 +184,7 @@ public final class FileExplorerController {
     private double scrollTop = 0.0;
     private boolean contextMenuOpen = false;
     private int contextFocusIndex = -1;
-    private int resizeColIndex = -1;
+    private String resizeColumnId;
     private double colResizeStartX;
     private double colResizeStartWidth;
     private double navWidth = 240;
@@ -209,6 +212,19 @@ public final class FileExplorerController {
     private int addressSuggestIndex = -1;
     private int addressSuggestCount = 0;
     private List<String> addressSuggestCandidates = null;
+
+    /** 列选择对话框中的一行草稿。 */
+    private static final class ColumnDraft {
+        final String id;
+        boolean visible;
+        double width;
+
+        private ColumnDraft(String id, boolean visible, double width) {
+            this.id = id;
+            this.visible = visible;
+            this.width = width;
+        }
+    }
 
     public FileExplorerController(VirtualFileSystem fs) {
         this.fs = fs;
@@ -261,6 +277,7 @@ public final class FileExplorerController {
     public void closeWindow() {
         hideTooltip();
         closeContextMenu();
+        closeColumnManager();
         // 只有“最近一次被玩家亲手调整过几何”的窗口才有资格改写持久化记录：
         // 关掉一个没动过的旧窗口不能把玩家刚调好的位置覆盖回去。
         if (FileExplorerWindow.isGeometryOwner(this)) {
@@ -618,6 +635,29 @@ public final class FileExplorerController {
             }
         });
 
+        // 列选择对话框：关闭 / 遮罩 / 确定 / 取消 / Esc。
+        Element columnsClose = document.getElementById("fe-columns-close");
+        if (columnsClose != null) {
+            columnsClose.addEventListener("click", e -> closeColumnManager());
+        }
+        Element columnsCancel = document.getElementById("fe-columns-cancel");
+        if (columnsCancel != null) {
+            columnsCancel.addEventListener("click", e -> closeColumnManager());
+        }
+        Element columnsOk = document.getElementById("fe-columns-ok");
+        if (columnsOk != null) {
+            columnsOk.addEventListener("click", e -> applyColumnManager());
+        }
+        Element columnsOverlay = document.getElementById("fe-columns-overlay");
+        if (columnsOverlay != null) {
+            columnsOverlay.addEventListener("click", e -> closeColumnManager());
+        }
+        document.addEventListener("keydown", e -> {
+            if (e instanceof KeyEvent ke && "Escape".equalsIgnoreCase(ke.key) && columnManagerOpen) {
+                closeColumnManager();
+            }
+        });
+
         // 左键点在菜单外时关闭菜单。
         document.addEventListener("mousedown", e -> {
             if (!(e instanceof MouseEvent me)) {
@@ -782,6 +822,8 @@ public final class FileExplorerController {
                 || hit.closest(".fe-ctx-menu") != null
                 || hit.closest(".fe-conflict-dialog") != null
                 || hit.closest(".fe-properties-dialog") != null
+                || hit.closest(".fe-columns-dialog") != null
+                || hit.closest(".fe-columns-overlay") != null
                 || hit.closest(".fe-selection-rect") != null
                 || hit.closest(".fe-tooltip") != null
                 || hit.closest(".fe-rename-input") != null
@@ -792,6 +834,10 @@ public final class FileExplorerController {
     private void bindKeyboard() {
         document.addEventListener("keydown", e -> {
             if (!(e instanceof KeyEvent ke)) {
+                return;
+            }
+            // 列选择是模态对话框：键盘操作不能再落到背后的文件列表。
+            if (columnManagerOpen) {
                 return;
             }
             String key = ke.key;
@@ -1480,6 +1526,7 @@ public final class FileExplorerController {
     }
 
     private void renderAllAfterTabChange() {
+        closeColumnManager();
         // 标签页恢复的字段只是缓存，最终以「身份 + 当前文件夹」的设置为准。
         applyViewState(ExplorerPreferences.viewState(currentKey), false);
         renderTabs();
@@ -1611,28 +1658,29 @@ public final class FileExplorerController {
         activateCapture();
     }
 
-    private void beginColumnResize(int col, double mouseX) {
-        if (col < 0 || col >= columnWidths.size()) {
+    private void beginColumnResize(String id, double mouseX) {
+        if (id == null) {
             return;
         }
         interaction = "colresize";
-        resizeColIndex = col;
+        resizeColumnId = id;
         colResizeStartX = mouseX;
-        colResizeStartWidth = columnWidths.get(col);
+        colResizeStartWidth = columnWidth(id);
         activateCapture();
     }
 
     private void applyColumnResize(double mouseX) {
-        if (resizeColIndex < 0 || resizeColIndex >= columnWidths.size()) {
+        if (resizeColumnId == null) {
             return;
         }
-        int col = resizeColIndex;
+        String id = resizeColumnId;
         double dx = mouseX - colResizeStartX;
         double newWidth = Math.max(48.0, colResizeStartWidth + dx);
-        columnWidths.set(col, newWidth);
         // 先读存储里的最新视图再只改这一列，避免另一个窗口同时改了排序/分组时被本地快照覆盖。
-        ExplorerViewState updated = ExplorerPreferences.updateView(currentKey,
-                state -> state.columnWidths[col] = newWidth);
+        ExplorerViewState updated = ExplorerPreferences.updateView(currentKey, state -> {
+            ExplorerColumnService.ensureStateColumns(state);
+            state.setWidth(id, newWidth);
+        });
         applyViewState(updated, false);
         renderContent();
     }
@@ -1816,7 +1864,7 @@ public final class FileExplorerController {
         interactionMoved = false;
         interaction = "none";
         resizeHandle = "";
-        resizeColIndex = -1;
+        resizeColumnId = null;
         if (selectionRect != null) {
             selectionRect.setInlineStyleProperty("display", "none");
         }
@@ -2142,6 +2190,7 @@ public final class FileExplorerController {
             folderChanged = true;
         }
         if (diskChanged || folderChanged) {
+            closeColumnManager();
             applyViewState(ExplorerPreferences.viewState(currentKey), false);
         }
         selected.clear();
@@ -2385,12 +2434,11 @@ public final class FileExplorerController {
 
     private void showSortMenu(double x, double y) {
         List<CtxEntry> entries = new ArrayList<>();
-        entries.add(CtxEntry.actionChecked(t("informationera.fe.name"), "name".equals(sortField), () -> setSort("name")));
-        entries.add(CtxEntry.actionChecked(t("informationera.fe.modified"), "modified".equals(sortField), () -> setSort("modified")));
-        entries.add(CtxEntry.actionChecked(t("informationera.fe.created"), "created".equals(sortField), () -> setSort("created")));
-        entries.add(CtxEntry.actionChecked(t("informationera.fe.type"), "type".equals(sortField), () -> setSort("type")));
-        entries.add(CtxEntry.actionChecked(t("informationera.fe.size"), "size".equals(sortField), () -> setSort("size")));
-        entries.add(CtxEntry.actionChecked(t("informationera.fe.author"), "author".equals(sortField), () -> setSort("author")));
+        for (ExplorerColumn column : ExplorerColumnService.columns()) {
+            String label = ExplorerColumnService.label(column).getString();
+            entries.add(CtxEntry.actionChecked(label, column.id().equals(sortField),
+                    () -> setSort(column.id())));
+        }
         entries.add(CtxEntry.separator());
         entries.add(CtxEntry.actionChecked(t("informationera.fe.asc"), sortAsc, () -> setSortAscending(true)));
         entries.add(CtxEntry.actionChecked(t("informationera.fe.desc"), !sortAsc, () -> setSortAscending(false)));
@@ -3061,8 +3109,20 @@ public final class FileExplorerController {
             } else {
                 // 文件的「大小」在物品磁盘里就是它引用的物品数量。
                 appendPropertyRow(sb, t("informationera.fe.item_count"), formatSize(entry.count));
+                ExplorerColumnContext columnContext = contextFor(entry);
                 if (entry.itemId != null) {
                     appendPropertyRow(sb, t("informationera.fe.item_id"), entry.itemId);
+                    appendPropertyRow(sb, t("informationera.fe.column_namespace"), columnContext.namespace());
+                }
+                int maxStack = columnContext.maxStack();
+                int maxDamage = columnContext.maxDamage();
+                if (maxStack > 0) {
+                    appendPropertyRow(sb, t("informationera.fe.column_max_stack"),
+                            Integer.toString(maxStack));
+                }
+                if (maxDamage > 0) {
+                    appendPropertyRow(sb, t("informationera.fe.column_durability"),
+                            Integer.toString(maxDamage));
                 }
             }
             if (entry.shortcutTargetKey != null && fs.folder(entry.shortcutTargetKey) != null) {
@@ -3182,16 +3242,25 @@ public final class FileExplorerController {
         sortAsc = state.sortAsc;
         foldersFirst = state.foldersFirst;
         groupBy = state.groupBy;
-        for (int col = 0; col < ExplorerViewState.COLUMN_COUNT; col++) {
-            columnWidths.set(col, state.columnWidths[col]);
-        }
-        System.arraycopy(state.columnVisible, 0, columnVisible, 0, ExplorerViewState.COLUMN_COUNT);
+        ExplorerColumnService.ensureStateColumns(state);
+        applyColumnState(state);
         if (groupChanged) {
             collapsedGroups.clear();
         }
         if (rerender) {
             renderContent();
         }
+    }
+
+    /** 把状态里的列设置复制到本窗口的本地镜像。 */
+    private void applyColumnState(ExplorerViewState state) {
+        columnSettings.clear();
+        for (java.util.Map.Entry<String, ExplorerViewState.ColumnSetting> entry : state.columnSettings.entrySet()) {
+            ExplorerViewState.ColumnSetting setting = entry.getValue();
+            columnSettings.put(entry.getKey(), new ExplorerViewState.ColumnSetting(setting.width, setting.visible));
+        }
+        columnOrder.clear();
+        columnOrder.addAll(state.columnOrder);
     }
 
     /** 把存储里的全局显示设置套用到本窗口，不写回存储。 */
@@ -3644,6 +3713,7 @@ public final class FileExplorerController {
     }
 
     private void afterNavigate() {
+        closeColumnManager();
         selected.clear();
         lastClickedIndex = -1;
         checkedSet.clear();
@@ -3997,11 +4067,7 @@ public final class FileExplorerController {
         if (details) {
             sb.append("<div class=\"fe-table fe-vtable\" style=\"").append(tableWidthStyle()).append("\">");
             sb.append("<div class=\"fe-vthead\" style=\"").append(gridTemplateStyle()).append("\">");
-            for (int col = 0; col < COL_FIELDS.length; col++) {
-                if (columnVisible[col]) {
-                    sb.append(headerCell(columnLabels()[col], COL_FIELDS[col], col));
-                }
-            }
+            appendHeaderCells(sb);
             sb.append("</div>");
         }
         sb.append("<div class=\"fe-vbody\" style=\"height:").append(Math.round(totalHeight))
@@ -4023,11 +4089,7 @@ public final class FileExplorerController {
                       .append(" data-folder=\"").append(entry.folder ? "1" : "0").append("\"")
                       .append(folderPathAttr(entry))
                       .append(" style=\"").append(gridTemplateStyle()).append("\">");
-                    for (int col = 0; col < COL_FIELDS.length; col++) {
-                        if (columnVisible[col]) {
-                            sb.append(cellDiv(entry, col, i));
-                        }
-                    }
+                    appendRowCells(sb, entry, i, true);
                     sb.append("</div>");
                 } else {
                     sb.append("<div class=\"fe-item fe-vrow fe-list-item\" data-id=\"e").append(i).append("\"")
@@ -4050,37 +4112,15 @@ public final class FileExplorerController {
     }
 
     /** 虚拟滚动模式下的单元格（div 形式，对应 cellFor）。 */
-    private String cellDiv(VirtualFileSystem.Entry entry, int col, int index) {
-        switch (col) {
-            case 0 -> {
-                StringBuilder sb = new StringBuilder("<div class=\"fe-cell\">");
-                if (checkboxes) {
-                    sb.append("<span class=\"fe-check\" data-id=\"e").append(index).append("\"></span>");
-                }
-                sb.append(iconFor(entry, 16))
-                  .append("<span class=\"fe-name-text\" data-name=\"1\">").append(escape(displayName(entry))).append("</span>")
-                  .append("</div>");
-                return sb.toString();
-            }
-            case 1 -> {
-                return "<div class=\"fe-vcell\">" + escape(entry.modified) + "</div>";
-            }
-            case 2 -> {
-                return "<div class=\"fe-vcell\">" + escape(entry.type) + "</div>";
-            }
-            case 3 -> {
-                return "<div class=\"fe-vcell\">" + (entry.folder ? "" : formatSize(entry.size)) + "</div>";
-            }
-            case 4 -> {
-                return "<div class=\"fe-vcell\">" + escape(entry.created) + "</div>";
-            }
-            case 5 -> {
-                return "<div class=\"fe-vcell\">" + escape(entry.author) + "</div>";
-            }
-            default -> {
-                return "<div class=\"fe-vcell\"></div>";
-            }
+    private String cellDiv(ExplorerColumn column, VirtualFileSystem.Entry entry, int index,
+                           ExplorerColumnContext context) {
+        String id = escape(column.id());
+        if (ExplorerViewState.NAME_COLUMN_ID.equals(column.id())) {
+            return "<div class=\"fe-cell\" data-col=\"" + id + "\">"
+                    + nameCellInner(entry, index, context) + "</div>";
         }
+        return "<div class=\"fe-vcell\" data-col=\"" + id + "\">"
+                + escape(ExplorerColumnService.value(column, context)) + "</div>";
     }
 
     /** 图标/平铺视图的窗口化渲染：按列数估算总行数，只渲染可视行 ± 缓冲。 */
@@ -4286,27 +4326,25 @@ public final class FileExplorerController {
                 entries.add(entry);
             }
         }
-        // 有分组时先按分组标签排序，组内再按常规排序；否则只按常规排序。
+        // 有分组时先确定组顺序，再让每组复用当前列排序（包括第三方列），
+        // 不能再用名称排序覆盖表头的排序选择。
         if (groupBy != null && !groupBy.isEmpty()) {
-            entries.sort((a, b) -> {
-                int cmp = groupLabel(a).compareToIgnoreCase(groupLabel(b));
-                if (cmp != 0) {
-                    return cmp;
-                }
-                return compareEntries(a, b);
-            });
+            java.util.Map<String, List<VirtualFileSystem.Entry>> groups = new java.util.LinkedHashMap<>();
+            for (VirtualFileSystem.Entry entry : entries) {
+                groups.computeIfAbsent(groupLabel(entry), key -> new ArrayList<>()).add(entry);
+            }
+            List<String> labels = new ArrayList<>(groups.keySet());
+            labels.sort(String.CASE_INSENSITIVE_ORDER);
+            entries.clear();
+            for (String label : labels) {
+                List<VirtualFileSystem.Entry> group = groups.get(label);
+                sortEntries(group);
+                entries.addAll(group);
+            }
         } else {
             sortEntries(entries);
         }
         return entries;
-    }
-
-    /** 组内排序（文件夹优先可配置 + 自然排序名称）。 */
-    private int compareEntries(VirtualFileSystem.Entry a, VirtualFileSystem.Entry b) {
-        if (foldersFirst && a.folder != b.folder) {
-            return a.folder ? -1 : 1;
-        }
-        return VirtualFileSystem.naturalCompare(a.name, b.name);
     }
 
     private String displayName(VirtualFileSystem.Entry entry) {
@@ -4403,6 +4441,15 @@ public final class FileExplorerController {
     }
 
     private void sortEntries(List<VirtualFileSystem.Entry> entries) {
+        ExplorerColumn sortColumn = ExplorerColumnService.column(sortField);
+        if (sortColumn == null) {
+            sortColumn = ExplorerColumnService.column(ExplorerViewState.BUILT_IN_SORT_FIELD);
+        }
+        java.util.Map<VirtualFileSystem.Entry, ExplorerColumnContext> contexts = new java.util.IdentityHashMap<>();
+        for (VirtualFileSystem.Entry entry : entries) {
+            contexts.put(entry, contextFor(entry));
+        }
+        final ExplorerColumn column = sortColumn;
         entries.sort((a, b) -> {
             int cmp;
             if (foldersFirst && a.folder != b.folder) {
@@ -4410,14 +4457,7 @@ public final class FileExplorerController {
             } else if (a.folder && b.folder) {
                 cmp = VirtualFileSystem.naturalCompare(a.name, b.name);
             } else {
-                cmp = switch (sortField) {
-                    case "modified" -> a.modified.compareTo(b.modified);
-                    case "created" -> a.created.compareTo(b.created);
-                    case "type" -> a.type.compareToIgnoreCase(b.type);
-                    case "author" -> a.author.compareToIgnoreCase(b.author);
-                    case "size" -> Long.compare(a.size, b.size);
-                    default -> VirtualFileSystem.naturalCompare(a.name, b.name);
-                };
+                cmp = ExplorerColumnService.compare(column, contexts.get(a), contexts.get(b));
             }
             if (cmp == 0) {
                 cmp = VirtualFileSystem.naturalCompare(a.name, b.name);
@@ -4426,15 +4466,16 @@ public final class FileExplorerController {
         });
     }
 
+    /** 条目的公开列上下文；物品栈延迟构造。 */
+    private ExplorerColumnContext contextFor(VirtualFileSystem.Entry entry) {
+        return ExplorerColumnService.context(entry, displayName(entry), () -> stackForEntry(entry));
+    }
+
     private String buildTable(List<VirtualFileSystem.Entry> entries) {
         StringBuilder sb = new StringBuilder();
         sb.append("<table class=\"table fe-table\" style=\"").append(tableWidthStyle()).append("\">");
         sb.append("<thead><tr style=\"").append(gridTemplateStyle()).append("\">");
-        for (int col = 0; col < COL_FIELDS.length; col++) {
-            if (columnVisible[col]) {
-                sb.append(headerCell(columnLabels()[col], COL_FIELDS[col], col));
-            }
-        }
+        appendHeaderCells(sb);
         sb.append("</tr></thead><tbody>");
         if (groupBy != null && !groupBy.isEmpty()) {
             String currentGroup = null;
@@ -4461,12 +4502,7 @@ public final class FileExplorerController {
 
     /** 分组头（表格行形式，供 details / content 视图使用）。 */
     private String groupHeaderHtml(String label, boolean collapsed) {
-        int visibleColumns = 0;
-        for (boolean visible : columnVisible) {
-            if (visible) {
-                visibleColumns++;
-            }
-        }
+        int visibleColumns = visibleColumns().size();
         // 表格行必须用 colspan 跨过所有可见列：td 改成 table-cell 后不再像原来的
         // flex 单元格那样撑满整行，行高也才由这个单元格决定，避免与第一条目重叠。
         return "<tr class=\"fe-group-row\" data-group=\"" + escape(label)
@@ -4484,11 +4520,13 @@ public final class FileExplorerController {
                 + "</div>";
     }
 
-    private String headerCell(String label, String field, int col) {
-        boolean active = sortField.equals(field);
-        return "<th class=\"sortable" + (active ? " sort-active" : "") + "\" data-sort=\"" + field + "\" data-col=\"" + col + "\">"
-                + label
-                + "<span class=\"fe-col-resizer\" data-col=\"" + col + "\"></span></th>";
+    private String headerCell(ExplorerColumn column) {
+        String id = column.id();
+        boolean active = sortField.equals(id);
+        return "<th class=\"sortable" + (active ? " sort-active" : "") + "\" data-sort=\"" + escape(id)
+                + "\" data-col=\"" + escape(id) + "\">"
+                + escape(ExplorerColumnService.label(column).getString())
+                + "<span class=\"fe-col-resizer\" data-col=\"" + escape(id) + "\"></span></th>";
     }
 
     private void bindTableHeaders() {
@@ -4502,7 +4540,7 @@ public final class FileExplorerController {
             th.addEventListener("contextmenu", e -> {
                 e.stopPropagation();
                 if (e instanceof MouseEvent me) {
-                    showHeaderContextMenu(me.clientX, me.clientY);
+                    showHeaderContextMenu(th.getAttribute("data-col"), me.clientX, me.clientY);
                 }
             });
         }
@@ -4534,19 +4572,11 @@ public final class FileExplorerController {
             }
         }
         for (Element handle : document.querySelectorAll(".fe-col-resizer")) {
-            String colStr = handle.getAttribute("data-col");
-            int col = -1;
-            if (colStr != null) {
-                try {
-                    col = Integer.parseInt(colStr);
-                } catch (NumberFormatException ignored) {
-                }
-            }
-            int c = col;
+            String columnId = handle.getAttribute("data-col");
             handle.addEventListener("mousedown", e -> {
                 if (e instanceof MouseEvent me && me.button == 0) {
                     e.stopPropagation();
-                    beginColumnResize(c, me.clientX);
+                    beginColumnResize(columnId, me.clientX);
                 }
             });
             handle.addEventListener("click", e -> e.stopPropagation());
@@ -4563,60 +4593,102 @@ public final class FileExplorerController {
           .append(" data-folder=\"").append(entry.folder ? "1" : "0").append("\"")
           .append(folderPathAttr(entry))
           .append(" style=\"").append(gridTemplateStyle()).append("\">");
-        for (int col = 0; col < COL_FIELDS.length; col++) {
-            if (columnVisible[col]) {
-                sb.append(cellFor(entry, col, index));
-            }
-        }
+        appendRowCells(sb, entry, index, false);
         sb.append("</tr>");
     }
 
-    private String cellFor(VirtualFileSystem.Entry entry, int col, int index) {
-        switch (col) {
-            case 0 -> {
-                StringBuilder sb = new StringBuilder();
-                sb.append("<td><div class=\"fe-cell\">");
-                if (checkboxes) {
-                    sb.append("<span class=\"fe-check\" data-id=\"e").append(index).append("\"></span>");
-                }
-                sb.append(iconFor(entry, 16))
-                  .append("<span class=\"fe-name-text\" data-name=\"1\">").append(escape(displayName(entry))).append("</span>")
-                  .append("</div></td>");
-                return sb.toString();
+    private String cellFor(ExplorerColumn column, VirtualFileSystem.Entry entry, int index,
+                           ExplorerColumnContext context) {
+        String id = escape(column.id());
+        if (ExplorerViewState.NAME_COLUMN_ID.equals(column.id())) {
+            return "<td data-col=\"" + id + "\"><div class=\"fe-cell\">"
+                    + nameCellInner(entry, index, context) + "</div></td>";
+        }
+        return "<td data-col=\"" + id + "\">"
+                + escape(ExplorerColumnService.value(column, context)) + "</td>";
+    }
+
+    /** 名称列共享片段：普通 td 与虚拟 div 都走这里。 */
+    private String nameCellInner(VirtualFileSystem.Entry entry, int index, ExplorerColumnContext context) {
+        StringBuilder sb = new StringBuilder();
+        if (checkboxes) {
+            sb.append("<span class=\"fe-check\" data-id=\"e").append(index).append("\"></span>");
+        }
+        sb.append(iconFor(entry, 16))
+          .append("<span class=\"fe-name-text\" data-name=\"1\">").append(escape(context.name())).append("</span>");
+        return sb.toString();
+    }
+
+    /** 当前注册列按本窗口列序排列；未出现在列序里的新列追加在末尾。 */
+    private List<ExplorerColumn> orderedColumns() {
+        List<ExplorerColumn> result = new ArrayList<>();
+        java.util.Set<String> seen = new java.util.HashSet<>();
+        for (String id : columnOrder) {
+            ExplorerColumn column = ExplorerColumnService.column(id);
+            if (column != null && seen.add(id)) {
+                result.add(column);
             }
-            case 1 -> {
-                return "<td>" + escape(entry.modified) + "</td>";
+        }
+        for (ExplorerColumn column : ExplorerColumnService.columns()) {
+            if (seen.add(column.id())) {
+                result.add(column);
             }
-            case 2 -> {
-                return "<td>" + escape(entry.type) + "</td>";
+        }
+        return result;
+    }
+
+    private List<ExplorerColumn> visibleColumns() {
+        List<ExplorerColumn> result = new ArrayList<>();
+        for (ExplorerColumn column : orderedColumns()) {
+            if (columnVisible(column.id())) {
+                result.add(column);
             }
-            case 3 -> {
-                return "<td>" + (entry.folder ? "" : formatSize(entry.size)) + "</td>";
-            }
-            case 4 -> {
-                return "<td>" + escape(entry.created) + "</td>";
-            }
-            case 5 -> {
-                return "<td>" + escape(entry.author) + "</td>";
-            }
-            default -> {
-                return "<td></td>";
-            }
+        }
+        return result;
+    }
+
+    private double columnWidth(String id) {
+        ExplorerViewState.ColumnSetting setting = columnSettings.get(id);
+        if (setting != null) {
+            return setting.width;
+        }
+        ExplorerColumn column = ExplorerColumnService.column(id);
+        return column == null ? 120.0 : column.defaultWidth();
+    }
+
+    private boolean columnVisible(String id) {
+        ExplorerViewState.ColumnSetting setting = columnSettings.get(id);
+        if (setting != null) {
+            return setting.visible;
+        }
+        ExplorerColumn column = ExplorerColumnService.column(id);
+        return column != null && column.defaultVisible();
+    }
+
+    private void appendHeaderCells(StringBuilder sb) {
+        for (ExplorerColumn column : visibleColumns()) {
+            sb.append(headerCell(column));
+        }
+    }
+
+    private void appendRowCells(StringBuilder sb, VirtualFileSystem.Entry entry, int index, boolean virtual) {
+        ExplorerColumnContext context = contextFor(entry);
+        for (ExplorerColumn column : visibleColumns()) {
+            sb.append(virtual
+                    ? cellDiv(column, entry, index, context)
+                    : cellFor(column, entry, index, context));
         }
     }
 
     private String gridTemplateStyle() {
         StringBuilder sb = new StringBuilder("grid-template-columns:");
         boolean first = true;
-        for (int col = 0; col < COL_FIELDS.length; col++) {
-            if (!columnVisible[col]) {
-                continue;
-            }
+        for (ExplorerColumn column : visibleColumns()) {
             if (!first) {
                 sb.append(' ');
             }
             first = false;
-            sb.append(Math.round(columnWidths.get(col))).append("px");
+            sb.append(Math.round(columnWidth(column.id()))).append("px");
         }
         sb.append(';');
         return sb.toString();
@@ -4624,52 +4696,380 @@ public final class FileExplorerController {
 
     private String tableWidthStyle() {
         double sum = 0;
-        for (int col = 0; col < COL_FIELDS.length; col++) {
-            if (columnVisible[col]) {
-                sum += columnWidths.get(col);
-            }
+        for (ExplorerColumn column : visibleColumns()) {
+            sum += columnWidth(column.id());
         }
         return "width:" + Math.round(sum) + "px;";
     }
 
-    private static int visibleColumnCount(boolean[] visible) {
-        int n = 0;
-        for (boolean value : visible) {
-            if (value) {
-                n++;
-            }
-        }
-        return n;
-    }
-
-    private void toggleColumn(int col) {
-        ExplorerViewState current = ExplorerPreferences.viewState(currentKey);
-        if (current.columnVisible[col] && visibleColumnCount(current.columnVisible) <= 1) {
-            setStatus(t("informationera.fe.status_at_least_one_col"));
+    private void toggleColumn(String id) {
+        if (ExplorerViewState.NAME_COLUMN_ID.equals(id)) {
+            setStatus(t("informationera.fe.column_manager_name_required"));
             return;
         }
-        changeView(state -> state.columnVisible[col] = !state.columnVisible[col]);
+        boolean currently = columnVisible(id);
+        changeView(state -> {
+            ExplorerColumnService.ensureStateColumns(state);
+            state.setVisible(id, !currently);
+            state.normalize();
+        });
     }
 
     private void resetColumnWidths() {
-        changeView(state -> System.arraycopy(ExplorerViewState.BUILT_IN_COLUMN_WIDTHS, 0,
-                state.columnWidths, 0, ExplorerViewState.COLUMN_COUNT));
+        changeView(state -> {
+            ExplorerColumnService.ensureStateColumns(state);
+            for (ExplorerColumn column : ExplorerColumnService.columns()) {
+                state.setWidth(column.id(), column.defaultWidth());
+            }
+            state.normalize();
+        });
     }
 
-    private void showHeaderContextMenu(double x, double y) {
+    private void showHeaderContextMenu(String targetId, double x, double y) {
+        String target = ExplorerColumnService.column(targetId) == null
+                ? ExplorerViewState.NAME_COLUMN_ID : targetId;
         List<CtxEntry> entries = new ArrayList<>();
-        for (int col = 0; col < COL_FIELDS.length; col++) {
-            int c = col;
-            entries.add(CtxEntry.actionChecked(columnLabels()[col], columnVisible[col], () -> toggleColumn(c)));
+        entries.add(CtxEntry.action(t("informationera.fe.fit_this_column"), () -> autoFitColumn(target)));
+        entries.add(CtxEntry.action(t("informationera.fe.fit_all_columns"), this::autoFitAllColumns));
+        entries.add(CtxEntry.separator());
+        for (String id : ExplorerColumnService.commonColumnIds()) {
+            ExplorerColumn column = ExplorerColumnService.column(id);
+            if (column == null) {
+                continue;
+            }
+            entries.add(CtxEntry.actionChecked(
+                    ExplorerColumnService.label(column).getString(),
+                    columnVisible(id),
+                    () -> toggleColumn(id)));
         }
+        entries.add(CtxEntry.action(t("informationera.fe.other_columns"), this::showColumnManager));
         entries.add(CtxEntry.separator());
         entries.add(CtxEntry.action(t("informationera.fe.show_all_columns"), this::showAllColumns));
         entries.add(CtxEntry.action(t("informationera.fe.reset_widths"), this::resetColumnWidths));
         openContextMenu(x, y, entries);
     }
 
+    private void autoFitColumn(String id) {
+        if (id == null) {
+            return;
+        }
+        double width = measureColumnWidth(id);
+        changeView(state -> {
+            ExplorerColumnService.ensureStateColumns(state);
+            state.setWidth(id, width);
+            state.normalize();
+        });
+        setStatus(t("informationera.fe.status_column_fitted"));
+    }
+
+    private void autoFitAllColumns() {
+        List<ExplorerColumn> columns = visibleColumns();
+        java.util.Map<String, Double> widths = new java.util.LinkedHashMap<>();
+        for (ExplorerColumn column : columns) {
+            widths.put(column.id(), measureColumnWidth(column.id()));
+        }
+        changeView(state -> {
+            ExplorerColumnService.ensureStateColumns(state);
+            for (java.util.Map.Entry<String, Double> entry : widths.entrySet()) {
+                state.setWidth(entry.getKey(), entry.getValue());
+            }
+            state.normalize();
+        });
+        setStatus(t("informationera.fe.status_columns_fitted"));
+    }
+
+    private double measureColumnWidth(String id) {
+        ExplorerColumn column = ExplorerColumnService.column(id);
+        if (column == null) {
+            return 120.0;
+        }
+        double measured = 0;
+        for (Element cell : document.querySelectorAll(".fe-table [data-col]")) {
+            if (id.equals(cell.getAttribute("data-col"))) {
+                measured = Math.max(measured, cell.scrollWidth);
+            }
+        }
+        Element measurer = document.getElementById("fe-measure");
+        if (measurer != null) {
+            measured = Math.max(measured,
+                    measureText(measurer, ExplorerColumnService.label(column).getString()) + 28);
+            for (VirtualFileSystem.Entry entry : renderedEntryList) {
+                ExplorerColumnContext context = contextFor(entry);
+                double width = measureText(measurer, ExplorerColumnService.value(column, context)) + 28;
+                if (ExplorerViewState.NAME_COLUMN_ID.equals(id)) {
+                    width += 16 + 6 + (checkboxes ? 16 + 6 : 0);
+                }
+                measured = Math.max(measured, width);
+            }
+        }
+        if (measured <= 0) {
+            return columnWidth(id);
+        }
+        return Math.max(64, Math.min(4000, Math.ceil(measured)));
+    }
+
+    private static double measureText(Element measurer, String text) {
+        measurer.setTextContent(text == null ? "" : text);
+        return measurer.scrollWidth;
+    }
+
     private void showAllColumns() {
-        changeView(state -> Arrays.fill(state.columnVisible, true));
+        changeView(state -> {
+            ExplorerColumnService.ensureStateColumns(state);
+            for (ExplorerColumn column : ExplorerColumnService.columns()) {
+                state.setVisible(column.id(), true);
+            }
+            state.normalize();
+        });
+    }
+
+    /** 打开原生样式的列选择对话框；草稿在确定前不影响当前视图。 */
+    private void showColumnManager() {
+        hideTooltip();
+        closeContextMenu();
+        Element dialog = document.getElementById("fe-columns-dialog");
+        Element overlay = document.getElementById("fe-columns-overlay");
+        Element title = document.getElementById("fe-columns-title");
+        Element hint = document.getElementById("fe-columns-hint");
+        if (dialog == null || overlay == null) {
+            return;
+        }
+        ExplorerViewState state = ExplorerPreferences.viewState(currentKey);
+        ExplorerColumnService.ensureStateColumns(state);
+        columnManagerBase = state.copy();
+        columnDrafts.clear();
+        for (ExplorerColumn column : orderedColumns()) {
+            columnDrafts.add(new ColumnDraft(
+                    column.id(),
+                    state.visible(column.id(), column.defaultVisible()),
+                    state.width(column.id(), column.defaultWidth())));
+        }
+        if (title != null) {
+            title.setTextContent(t("informationera.fe.column_manager_title"));
+        }
+        if (hint != null) {
+            hint.setTextContent(t("informationera.fe.column_manager_hint"));
+        }
+        Element ok = document.getElementById("fe-columns-ok");
+        if (ok != null) {
+            ok.setTextContent(t("informationera.fe.ok"));
+        }
+        Element cancel = document.getElementById("fe-columns-cancel");
+        if (cancel != null) {
+            cancel.setTextContent(t("informationera.fe.cancel"));
+        }
+        Element close = document.getElementById("fe-columns-close");
+        if (close != null) {
+            close.setAttribute("aria-label", t("informationera.fe.close"));
+        }
+        renderColumnManager();
+        Size viewport = document.getViewportSize();
+        double width = 640;
+        double height = Math.min(560, Math.max(180, viewport.height() - 180));
+        double left = Math.max(8, (viewport.width() - width) / 2);
+        double top = Math.max(8, (viewport.height() - height) / 2);
+        dialog.setInlineStyleProperty("left", px(left));
+        dialog.setInlineStyleProperty("top", px(top));
+        dialog.setInlineStyleProperty("height", px(height));
+        dialog.setInlineStyleProperty("display", "flex");
+        overlay.setInlineStyleProperty("display", "block");
+        columnManagerOpen = true;
+    }
+
+    private void renderColumnManager() {
+        Element body = document.getElementById("fe-columns-body");
+        if (body == null) {
+            return;
+        }
+        double scrollTop = body.getScrollTop();
+        StringBuilder sb = new StringBuilder();
+        sb.append("<div class=\"fe-columns-head\">")
+          .append("<span>").append(escape(t("informationera.fe.column_manager_show")))
+          .append("</span><span>").append(escape(t("informationera.fe.column_manager_column")))
+          .append("</span><span>").append(escape(t("informationera.fe.column_manager_width")))
+          .append("</span><span>").append(escape(t("informationera.fe.column_manager_order")))
+          .append("</span></div>");
+        for (int i = 0; i < columnDrafts.size(); i++) {
+            ColumnDraft draft = columnDrafts.get(i);
+            ExplorerColumn column = ExplorerColumnService.column(draft.id);
+            if (column == null) {
+                continue;
+            }
+            boolean name = ExplorerViewState.NAME_COLUMN_ID.equals(draft.id);
+            String id = escape(draft.id);
+            sb.append("<div class=\"fe-columns-row\" data-column-row=\"").append(i).append("\">");
+            sb.append("<span class=\"fe-columns-check")
+              .append(draft.visible ? " checked" : "")
+              .append(name ? " disabled" : "")
+              .append("\" data-column-check=\"").append(id).append("\" role=\"checkbox\" aria-checked=\"")
+              .append(draft.visible ? "true" : "false")
+              .append("\" title=\"").append(escape(name
+                      ? t("informationera.fe.column_manager_name_required")
+                      : t("informationera.fe.column_manager_show"))).append("\">")
+              .append(draft.visible ? "✓" : "").append("</span>");
+            sb.append("<span class=\"fe-columns-label\">")
+              .append(escape(ExplorerColumnService.label(column).getString())).append("</span>");
+            sb.append("<input class=\"form-input-2 fe-columns-width\" data-column-width=\"")
+              .append(id).append("\" type=\"text\" value=\"")
+              .append(formatColumnWidth(draft.width)).append("\">");
+            sb.append("<span class=\"fe-columns-move-group\">");
+            sb.append("<button class=\"fe-columns-move").append(i == 0 ? " disabled" : "")
+              .append("\" type=\"button\" data-column-move=\"up\" data-column-row=\"")
+              .append(i).append("\" aria-label=\"").append(escape(t("informationera.fe.column_manager_up")))
+              .append("\"").append(i == 0 ? " disabled" : "").append(">↑</button>");
+            sb.append("<button class=\"fe-columns-move").append(i == columnDrafts.size() - 1 ? " disabled" : "")
+              .append("\" type=\"button\" data-column-move=\"down\" data-column-row=\"")
+              .append(i).append("\" aria-label=\"").append(escape(t("informationera.fe.column_manager_down")))
+              .append("\"").append(i == columnDrafts.size() - 1 ? " disabled" : "").append(">↓</button>");
+            sb.append("</span></div>");
+        }
+        body.setInnerHTML(sb.toString());
+        body.setScrollTop(scrollTop);
+
+        for (Element check : body.querySelectorAll(".fe-columns-check[data-column-check]")) {
+            String id = check.getAttribute("data-column-check");
+            check.addEventListener("click", e -> {
+                e.stopPropagation();
+                if (ExplorerViewState.NAME_COLUMN_ID.equals(id)) {
+                    setStatus(t("informationera.fe.column_manager_name_required"));
+                    return;
+                }
+                for (ColumnDraft draft : columnDrafts) {
+                    if (draft.id.equals(id)) {
+                        draft.visible = !draft.visible;
+                        break;
+                    }
+                }
+                renderColumnManager();
+            });
+        }
+        for (Element input : body.querySelectorAll(".fe-columns-width[data-column-width]")) {
+            String id = input.getAttribute("data-column-width");
+            input.addEventListener("input", e -> {
+                for (ColumnDraft draft : columnDrafts) {
+                    if (draft.id.equals(id)) {
+                        draft.width = parseColumnWidth(input.getValue(), draft.width);
+                        break;
+                    }
+                }
+            });
+            input.addEventListener("keydown", e -> {
+                e.stopPropagation();
+                if (e instanceof KeyEvent ke) {
+                    if ("Enter".equals(ke.key)) {
+                        applyColumnManager();
+                    } else if ("Escape".equals(ke.key)) {
+                        closeColumnManager();
+                    }
+                }
+            });
+        }
+        for (Element move : body.querySelectorAll(".fe-columns-move[data-column-move]")) {
+            String direction = move.getAttribute("data-column-move");
+            int row = parseColumnRow(move.getAttribute("data-column-row"));
+            move.addEventListener("click", e -> {
+                e.stopPropagation();
+                if (row < 0 || row >= columnDrafts.size()) {
+                    return;
+                }
+                int target = "up".equals(direction) ? row - 1 : row + 1;
+                if (target < 0 || target >= columnDrafts.size()) {
+                    return;
+                }
+                ColumnDraft moved = columnDrafts.remove(row);
+                columnDrafts.add(target, moved);
+                renderColumnManager();
+            });
+        }
+    }
+
+    private static int parseColumnRow(String raw) {
+        try {
+            return raw == null ? -1 : Integer.parseInt(raw);
+        } catch (NumberFormatException malformed) {
+            return -1;
+        }
+    }
+
+    private static String formatColumnWidth(double width) {
+        return String.format(Locale.ROOT, "%.0f", width);
+    }
+
+    private static double parseColumnWidth(String raw, double fallback) {
+        try {
+            double width = Double.parseDouble(raw == null ? "" : raw.trim());
+            if (!Double.isFinite(width)) {
+                return fallback;
+            }
+            return Math.max(48.0, Math.min(4000.0, width));
+        } catch (NumberFormatException malformed) {
+            return fallback;
+        }
+    }
+
+    private void applyColumnManager() {
+        if (!columnManagerOpen) {
+            return;
+        }
+        List<ColumnDraft> drafts = new ArrayList<>(columnDrafts);
+        ExplorerViewState base = columnManagerBase;
+        List<String> newOrder = new ArrayList<>();
+        for (ColumnDraft draft : drafts) {
+            newOrder.add(draft.id);
+        }
+        List<String> baseRegistered = new ArrayList<>();
+        if (base != null) {
+            for (String id : base.columnOrder) {
+                if (ExplorerColumnService.column(id) != null) {
+                    baseRegistered.add(id);
+                }
+            }
+        }
+        boolean orderChanged = base == null || !newOrder.equals(baseRegistered);
+        changeView(state -> {
+            ExplorerColumnService.ensureStateColumns(state);
+            if (orderChanged) {
+                state.setColumnOrder(newOrder);
+            }
+            for (ColumnDraft draft : drafts) {
+                ExplorerColumn column = ExplorerColumnService.column(draft.id);
+                if (column == null) {
+                    continue;
+                }
+                boolean visibleChanged = base == null
+                        || base.visible(draft.id, column.defaultVisible()) != draft.visible;
+                boolean widthChanged = base == null
+                        || base.width(draft.id, column.defaultWidth()) != draft.width;
+                if (visibleChanged) {
+                    state.setVisible(draft.id, draft.visible);
+                }
+                if (widthChanged) {
+                    state.setWidth(draft.id, draft.width);
+                }
+            }
+            state.normalize();
+        });
+        closeColumnManager();
+    }
+
+    private void closeColumnManager() {
+        if (document == null) {
+            columnManagerOpen = false;
+            columnDrafts.clear();
+            columnManagerBase = null;
+            return;
+        }
+        Element dialog = document.getElementById("fe-columns-dialog");
+        Element overlay = document.getElementById("fe-columns-overlay");
+        if (dialog != null) {
+            dialog.setInlineStyleProperty("display", "none");
+        }
+        if (overlay != null) {
+            overlay.setInlineStyleProperty("display", "none");
+        }
+        columnManagerOpen = false;
+        columnDrafts.clear();
+        columnManagerBase = null;
     }
 
     // ---------- 命名冲突对话框 ----------
@@ -4872,11 +5272,7 @@ public final class FileExplorerController {
         StringBuilder sb = new StringBuilder();
         sb.append("<table class=\"table fe-table fe-content-table\" style=\"").append(tableWidthStyle()).append("\">");
         sb.append("<thead><tr style=\"").append(gridTemplateStyle()).append("\">");
-        for (int col = 0; col < COL_FIELDS.length; col++) {
-            if (columnVisible[col]) {
-                sb.append(headerCell(columnLabels()[col], COL_FIELDS[col], col));
-            }
-        }
+        appendHeaderCells(sb);
         sb.append("</tr></thead><tbody>");
         if (groupBy != null && !groupBy.isEmpty()) {
             String currentGroup = null;

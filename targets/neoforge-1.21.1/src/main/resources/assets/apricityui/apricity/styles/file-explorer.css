@@ -725,6 +725,9 @@
 /* ---------- 列表视图 ---------- */
 .ore-theme .table.fe-table {
     width: 100%;
+    /* 列宽由表头 th 的内联 width 决定；auto 布局会按内容重新分配，
+       导致列宽设置/拖动/自适应在视觉上不生效。 */
+    table-layout: fixed;
     border: 0;
     background: var(--ore-canvas);
 }
@@ -2031,4 +2034,213 @@
     height: 0;
     margin: 4px 8px;
     border-top: 2px solid var(--ore-edge);
+}
+
+/* ---------- 列选择对话框（详情表头右键 → 其他…） ---------- */
+.fe-columns-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    z-index: 750;
+    /* 与上下文菜单同理：物品渲染使用固定 GUI Z（150/200），仅靠 z-index 盖不住。
+       模态层抬到 300，遮罩才能压暗图标，对话框也不会被物品穿出。 */
+    transform: translateZ(300px);
+    display: none;
+    pointer-events: auto;
+    background: rgba(0, 0, 0, 0.35);
+}
+
+.fe-columns-dialog {
+    position: absolute;
+    z-index: 760;
+    /* 同上：压过物品的固定 Z，保证勾选/宽度输入不被图标或光效盖住。 */
+    transform: translateZ(300px);
+    display: none;
+    width: 640px;
+    max-width: calc(100vw - 24px);
+    max-height: calc(100vh - 16px);
+    color: var(--ore-ink);
+    background: var(--ore-surface-deep);
+    border: 3px solid var(--ore-edge);
+    box-shadow: 6px 6px 0 rgba(0, 0, 0, 0.35);
+    pointer-events: auto;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.fe-columns-titlebar {
+    display: flex;
+    align-items: center;
+    height: 32px;
+    flex: 0 0 32px;
+    padding: 0 6px 0 12px;
+    background: var(--ore-surface);
+    border-bottom: 2px solid var(--ore-edge);
+}
+
+.fe-columns-title {
+    flex: 1 1 auto;
+    color: #ffffff;
+    font-size: var(--ore-font-md);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.fe-columns-close {
+    flex: 0 0 26px;
+    width: 26px;
+    height: 26px;
+    border: 0;
+    color: #ffffff;
+    background: transparent;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.fe-columns-close:hover {
+    background: var(--ore-red);
+}
+
+.fe-columns-close svg {
+    width: 12px;
+    height: 12px;
+}
+
+.fe-columns-hint {
+    flex: 0 0 auto;
+    padding: 6px 12px;
+    color: var(--ore-ink-muted);
+    font-size: var(--ore-font-sm);
+    border-bottom: 1px solid var(--ore-edge);
+    white-space: normal;
+    line-height: 1.4;
+}
+
+.fe-columns-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    padding: 6px 12px;
+}
+
+.fe-columns-head,
+.fe-columns-row {
+    display: grid;
+    grid-template-columns: 34px minmax(0, 1fr) 92px 68px;
+    gap: 8px;
+    align-items: center;
+}
+
+.fe-columns-head {
+    padding: 4px 0;
+    color: var(--ore-ink-muted);
+    font-size: var(--ore-font-sm);
+    border-bottom: 2px solid var(--ore-edge);
+}
+
+.fe-columns-row {
+    min-height: 32px;
+    padding: 2px 0;
+    border-bottom: 1px solid var(--ore-edge);
+}
+
+.fe-columns-check {
+    width: 16px;
+    height: 16px;
+    border: 2px solid var(--ore-edge-light);
+    background: var(--ore-surface-deep);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    line-height: 1;
+    color: #ffffff;
+}
+
+.fe-columns-check.checked {
+    background: var(--ore-green);
+    border-color: var(--ore-green);
+}
+
+.fe-columns-check.disabled {
+    cursor: default;
+    opacity: 0.8;
+}
+
+.fe-columns-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--ore-ink);
+    font-size: var(--ore-font-sm);
+}
+
+.fe-columns-width {
+    width: 84px;
+    min-height: 26px;
+    height: 26px;
+    padding: 2px 6px;
+    font-size: var(--ore-font-sm);
+}
+
+.fe-columns-move-group {
+    display: flex;
+    gap: 3px;
+    justify-content: flex-end;
+}
+
+.fe-columns-move {
+    width: 28px;
+    height: 26px;
+    padding: 0;
+    border: 2px solid var(--ore-edge);
+    color: var(--ore-ink);
+    background: var(--ore-surface);
+    cursor: pointer;
+    font-size: var(--ore-font-sm);
+}
+
+.fe-columns-move:hover {
+    color: #ffffff;
+    background: var(--ore-green);
+}
+
+.fe-columns-move:disabled,
+.fe-columns-move.disabled {
+    opacity: 0.35;
+    cursor: default;
+}
+
+.fe-columns-move.disabled:hover,
+.fe-columns-move:disabled:hover {
+    color: var(--ore-ink);
+    background: var(--ore-surface);
+}
+
+.fe-columns-actions {
+    flex: 0 0 auto;
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+    padding: 10px 12px;
+    border-top: 2px solid var(--ore-edge);
+}
+
+
+/* 自动列宽测量尺：与表格同字号，脱离文档流、不可见、不可命中。 */
+.fe-measure {
+    position: absolute;
+    left: -10000px;
+    top: 0;
+    visibility: hidden;
+    pointer-events: none;
+    white-space: nowrap;
+    font-size: var(--ore-font-sm);
 }

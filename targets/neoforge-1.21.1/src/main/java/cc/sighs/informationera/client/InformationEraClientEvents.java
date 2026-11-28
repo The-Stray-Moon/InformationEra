@@ -3,6 +3,7 @@ package cc.sighs.informationera.client;
 import com.mojang.blaze3d.platform.InputConstants;
 import net.minecraft.client.KeyMapping;
 import net.neoforged.bus.api.IEventBus;
+import net.neoforged.fml.event.lifecycle.FMLClientSetupEvent;
 import net.neoforged.neoforge.client.event.RegisterKeyMappingsEvent;
 import org.lwjgl.glfw.GLFW;
 
@@ -20,6 +21,12 @@ public final class InformationEraClientEvents {
 
     public static void register(IEventBus modEventBus) {
         modEventBus.addListener(InformationEraClientEvents::registerKeyMappings);
+        modEventBus.addListener(InformationEraClientEvents::onClientSetup);
+    }
+
+    /** 客户端模组类加载完成后扫描第三方详情列 provider。 */
+    private static void onClientSetup(FMLClientSetupEvent event) {
+        event.enqueueWork(ExplorerColumnService::discover);
     }
 
     private static void registerKeyMappings(RegisterKeyMappingsEvent event) {
