@@ -804,15 +804,17 @@
 }
 
 .ore-theme .table.fe-table .fe-group-header {
-    display: flex;
-    align-items: center;
-    gap: 6px;
+    /* 保持表格单元格，让 tr 的高度由分组头撑开；flex 单元格不会参与表格行高计算，
+       会把 tr 压成 0 高，导致分组标题与第一条目画在同一位置。 */
+    display: table-cell;
+    vertical-align: middle;
     padding: 6px 12px;
     color: #ffffff;
     background: var(--ore-surface-deep);
     border-right: 0;
     border-bottom: 2px solid var(--ore-edge);
     font-size: var(--ore-font-sm);
+    white-space: nowrap;
 }
 
 .fe-group-toggle {
@@ -822,10 +824,13 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
+    vertical-align: middle;
+    margin-right: 6px;
     cursor: pointer;
 }
 
 .fe-group-title {
+    vertical-align: middle;
     cursor: pointer;
 }
 
@@ -1346,9 +1351,11 @@
 .fe-ctx-menu {
     position: absolute;
     z-index: 600;
-    /* 抬 2px 的 Z：同文档里的物品图标走的是另一条绘制路径，光靠 z-index 排不到它们前面，
-       这里把菜单明确放到最近处，物品就不会再盖在菜单上。 */
-    transform: translateZ(2px);
+    /* 物品模型/附魔/前景走固定的 GUI Z（Base 中为 150/200/200.125），大图标还要用
+       transform:scale(...) 放大，会被 AUI 推进带变换的绘制路径，z-index 无法排序。
+       菜单必须高于这些固定 Z，否则大图标、数量角标和附魔光效会盖在菜单上；
+       300 留出余量，且仍低于资源管理器物品提示框的 Z=5000。 */
+    transform: translateZ(300px);
     display: none;
     min-width: 200px;
     padding: 4px;

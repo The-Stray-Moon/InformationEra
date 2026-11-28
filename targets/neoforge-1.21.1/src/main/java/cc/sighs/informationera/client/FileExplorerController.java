@@ -4220,10 +4220,18 @@ public final class FileExplorerController {
         return sb.toString();
     }
 
-    /** 分组头（表格行形式，供 details 视图使用）。 */
+    /** 分组头（表格行形式，供 details / content 视图使用）。 */
     private String groupHeaderHtml(String label, boolean collapsed) {
+        int visibleColumns = 0;
+        for (boolean visible : columnVisible) {
+            if (visible) {
+                visibleColumns++;
+            }
+        }
+        // 表格行必须用 colspan 跨过所有可见列：td 改成 table-cell 后不再像原来的
+        // flex 单元格那样撑满整行，行高也才由这个单元格决定，避免与第一条目重叠。
         return "<tr class=\"fe-group-row\" data-group=\"" + escape(label)
-                + "\" style=\"grid-template-columns:1fr;\"><td class=\"fe-group-header\">"
+                + "\"><td class=\"fe-group-header\" colspan=\"" + Math.max(1, visibleColumns) + "\">"
                 + "<span class=\"fe-group-toggle\">" + (collapsed ? "▸" : "▾") + "</span>"
                 + "<span class=\"fe-group-title\">" + escape(label) + "</span>"
                 + "</td></tr>";
