@@ -85,11 +85,18 @@ public final class ExplorerPreferences {
     /**
      * 筛选条件的使用历史，一行一条 {@code kind|value|uses|lastAccessMillis}。
      *
-     * <p>标签、模组、创造模式标签页三类共用一张表，历史全存档通用，不按玩家/磁盘隔离。
+     * <p>标签、模组、创造标签页、关键词四类共用一张表，历史全存档通用，不按玩家/磁盘隔离。
      */
     private static final ModConfigSpec.ConfigValue<List<? extends String>> FILTER_USAGE = BUILDER
             .comment("Explorer filter usage history: kind|value|uses|lastAccessMillis. Shared by all worlds.")
             .defineListAllowEmpty("filterUsage", new ArrayList<String>(), () -> "", ExplorerPreferences::isValidEntry);
+
+    /**
+     * 保存的筛选模板，一行一个完整快照。模板全存档通用，不按玩家/磁盘分片。
+     */
+    private static final ModConfigSpec.ConfigValue<List<? extends String>> FILTER_TEMPLATES = BUILDER
+            .comment("Saved explorer filter templates. Managed by the mod; shared by all worlds.")
+            .defineListAllowEmpty("filterTemplates", new ArrayList<String>(), () -> "", ExplorerPreferences::isValidEntry);
 
     /**
      * 「常用文件夹」的条数上限。
@@ -124,8 +131,10 @@ public final class ExplorerPreferences {
 
     /** 显示偏好的内存存储；每个身份、每个文件夹各一条，修改时只动目标记录。 */
     private static ExplorerViewStore viewStore = new ExplorerViewStore();
-    /** 筛选条件的使用历史（标签/模组/创造页共用），全存档通用。 */
+    /** 筛选条件的使用历史（标签/模组/创造标签页/关键词共用），全存档通用。 */
     private static ExplorerFilterHistory filterHistory = new ExplorerFilterHistory();
+    /** 保存的筛选模板；全存档通用。 */
+    private static ExplorerFilterTemplateStore filterTemplateStore = new ExplorerFilterTemplateStore();
     /** 是否有尚未落盘的显示偏好修改。 */
     private static boolean viewDirty;
     /** 最近一次显示偏好修改的时间，用于延迟合并写盘。 */
@@ -201,11 +210,13 @@ public final class ExplorerPreferences {
         }
         ExplorerViewStore loadedViews = ExplorerViewStore.decode(VIEW_STATE.get());
         ExplorerFilterHistory loadedFilters = ExplorerFilterHistory.decode(FILTER_USAGE.get());
+        ExplorerFilterTemplateStore loadedTemplates = ExplorerFilterTemplateStore.decode(FILTER_TEMPLATES.get());
         // 全部读取都成功，才覆盖内存镜像。显示偏好若还有未落盘的修改，以内存为准，
         // 避免外部重载把玩家刚做的调整吞掉。
         destinations.clear();
         destinations.addAll(loadedDestinations);
         filterHistory = loadedFilters;
+        filterTemplateStore = loadedTemplates;
         if (!viewDirty) {
             viewStore = loadedViews;
         }
@@ -376,6 +387,7 @@ public final class ExplorerPreferences {
         }
         DESTINATIONS.set(raw);
         FILTER_USAGE.set(filterHistory.encode());
+        FILTER_TEMPLATES.set(filterTemplateStore.encode());
         if (viewDirty) {
             VIEW_STATE.set(viewStore.encode());
         }
@@ -508,7 +520,7 @@ public final class ExplorerPreferences {
     /**
      * 记录一次筛选条件的使用。
      *
-     * <p>筛选历史全存档通用：它描述的是玩家习惯（常用哪些标签/模组/创造页），
+     * <p>筛选历史全存档通用：它描述的是玩家习惯（常用哪些标签/模组/创造标签页/关键词），
      * 与当前世界或磁盘无关，因此不像文件夹视图那样按玩家和磁盘分片。
      */
     public static void recordFilterUse(String kind, String value) {
@@ -530,6 +542,33 @@ public final class ExplorerPreferences {
     public static List<String> recentFilterValues(String kind, int limit) {
         ensureLoaded();
         return filterHistory.recent(kind, limit);
+    }
+
+    /** 全部模板名称，按名称排序，用于输入补全和“全部模板”。 */
+    static List<String> filterTemplateNames() {
+        ensureLoaded();
+        return filterTemplateStore.names();
+    }
+
+    /** 按名称查找模板（不区分大小写）。 */
+    static ExplorerFilterTemplate filterTemplate(String name) {
+        ensureLoaded();
+        return filterTemplateStore.find(name);
+    }
+
+    static boolean filterTemplateExists(String name) {
+        ensureLoaded();
+        return filterTemplateStore.exists(name);
+    }
+
+    /** 保存或显式覆盖模板；是否允许覆盖由 UI 的同名确认控制。 */
+    static void saveFilterTemplate(ExplorerFilterTemplate template) {
+        if (template == null || !template.hasName()) {
+            return;
+        }
+        ensureLoaded();
+        filterTemplateStore.save(template);
+        persist();
     }
 
     // ------------------------------------------- 显示偏好（玩家 / 磁盘两级作用域）

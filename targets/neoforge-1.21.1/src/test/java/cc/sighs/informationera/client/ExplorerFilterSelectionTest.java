@@ -101,4 +101,24 @@ public class ExplorerFilterSelectionTest {
         assertTrue(selection.matches("sample", Set.of(), Set.of()));
         assertFalse(selection.matches("minecraft", Set.of(), Set.of()));
     }
+
+    @Test
+    public void switchesDefaultOffAndResetClearsEverything() {
+        ExplorerFilterSelection selection = new ExplorerFilterSelection();
+        assertFalse(selection.dedupe);
+        assertFalse(selection.includeSubfolders);
+
+        selection.add(ExplorerFilterSelection.Kind.TAG, PLANKS);
+        selection.includeSubfolders = true;
+        selection.dedupe = true;
+        selection.reset();
+
+        assertTrue(selection.isEmpty());
+        assertFalse(selection.includeSubfolders);
+        assertFalse(selection.dedupe);
+        // clear 只清条件，保留开关；reset 连开关一起清。
+        selection.includeSubfolders = true;
+        selection.clear();
+        assertTrue(selection.includeSubfolders);
+    }
 }

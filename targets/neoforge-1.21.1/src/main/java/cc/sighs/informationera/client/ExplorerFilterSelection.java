@@ -7,7 +7,7 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * 资源管理器的筛选条件：标签、模组、创造模式标签页三组多值条件。
+ * 资源管理器的筛选条件：标签、模组、创造标签页、关键词四组多值条件。
  *
  * <p>同类条件取并集（OR），不同类之间取交集（AND）：勾选 {@code minecraft:planks} 与
  * {@code minecraft:logs} 表示“属于其中任一标签”；再勾选某模组则还必须来自该模组。
@@ -22,7 +22,8 @@ final class ExplorerFilterSelection {
     enum Kind {
         TAG("tag"),
         MOD("mod"),
-        TAB("tab");
+        TAB("tab"),
+        KEYWORD("keyword");
 
         private final String key;
 
@@ -39,6 +40,7 @@ final class ExplorerFilterSelection {
                 case TAG -> "informationera.fe.filter_tags";
                 case MOD -> "informationera.fe.filter_mods";
                 case TAB -> "informationera.fe.filter_tabs";
+                case KEYWORD -> "informationera.fe.filter_keywords";
             };
         }
 
@@ -56,6 +58,8 @@ final class ExplorerFilterSelection {
 
     private final Map<Kind, LinkedHashSet<String>> values = new EnumMap<>(Kind.class);
     boolean includeSubfolders;
+    /** 仅视觉去重：按真实 ItemKey 保留一个代表，不改数据也不合计库存。 */
+    boolean dedupe;
 
     ExplorerFilterSelection() {
         for (Kind kind : Kind.values()) {
@@ -113,12 +117,19 @@ final class ExplorerFilterSelection {
         }
     }
 
+    /** 重置整个筛选规则：条件与两个开关一起回到默认状态。 */
+    void reset() {
+        clear();
+        includeSubfolders = false;
+        dedupe = false;
+    }
+
     /**
      * 物品是否满足当前条件。
      *
      * @param modId 物品 id 的命名空间；未知时为 null
      * @param tags  物品实际拥有的标签 id
-     * @param tabs  物品出现的创造模式标签页 id
+     * @param tabs  物品出现的创造标签页 id
      */
     boolean matches(String modId, Collection<String> tags, Collection<String> tabs) {
         LinkedHashSet<String> mods = values.get(Kind.MOD);

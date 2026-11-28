@@ -151,11 +151,23 @@ public final class FileExplorerController {
     private boolean filterOpen = false;
     private boolean filterDialogOpen = false;
     private ExplorerFilterSelection.Kind filterDialogKind = ExplorerFilterSelection.Kind.TAG;
+    /** 当前筛选弹窗是否切换到“模板”模式；五段结构复用同一套 DOM。 */
+    private boolean filterDialogTemplates = false;
+    /** 当前完整应用的模板名称；手工改动任一规则后清空。 */
+    private String appliedFilterTemplate;
+    /** 保存模板的命名弹窗状态。 */
+    private boolean templateSaveDialogOpen = false;
+    private boolean templateSaveConfirmOverwrite = false;
+    private String templateSaveConfirmName;
     /** 当前筛选选择；关闭窗格后仍保留，重新打开时继续使用，但不参与关闭状态下的显示。 */
     private final ExplorerFilterSelection filterSelection = new ExplorerFilterSelection();
     /** 当前范围内每类条件的候选全集；范围/视图变化时整体失效。 */
     private final java.util.Map<ExplorerFilterSelection.Kind, List<String>> filterCandidateCache =
             new java.util.EnumMap<>(ExplorerFilterSelection.Kind.class);
+    /** 已按最新语言重绘筛选界面的版本。 */
+    private int filterLanguageVersion = -1;
+    /** 候选缓存对应的语言版本；单独记录，避免取候选时提前吞掉界面重绘。 */
+    private int filterCandidateLanguageVersion = -1;
     private int previewSize = 64;
     /** 预览图标尺寸的上下限与每次缩放的步长（像素）。 */
     private static final int PREVIEW_SIZE_MIN = 16;
@@ -291,6 +303,7 @@ public final class FileExplorerController {
         closeContextMenu();
         closeColumnManager();
         closeFilterDialog();
+        closeTemplateSaveDialog();
         // 只有“最近一次被玩家亲手调整过几何”的窗口才有资格改写持久化记录：
         // 关掉一个没动过的旧窗口不能把玩家刚调好的位置覆盖回去。
         if (FileExplorerWindow.isGeometryOwner(this)) {
@@ -341,8 +354,14 @@ public final class FileExplorerController {
         // 筛选窗格是窗口会话状态；重新挂载时从干净状态开始，避免旧条件落到新视图上。
         filterOpen = false;
         filterDialogOpen = false;
+        filterDialogTemplates = false;
+        appliedFilterTemplate = null;
+        templateSaveDialogOpen = false;
+        templateSaveConfirmOverwrite = false;
+        templateSaveConfirmName = null;
         filterSelection.clear();
         filterSelection.includeSubfolders = false;
+        filterSelection.dedupe = false;
         filterCandidateCache.clear();
         // 先恢复全局显示习惯与当前文件夹的视图，后面的渲染才有正确的初始值。
         applyDisplayState(ExplorerPreferences.display());
@@ -695,6 +714,56 @@ public final class FileExplorerController {
             }
         });
 
+        // 保存模板的命名弹窗：关闭 / 遮罩 / 取消 / 确定 / 输入框键盘。
+        Element templateSaveClose = document.getElementById("fe-template-save-close");
+        if (templateSaveClose != null) {
+            templateSaveClose.addEventListener("click", e -> closeTemplateSaveDialog());
+        }
+        Element templateSaveCancel = document.getElementById("fe-template-save-cancel");
+        if (templateSaveCancel != null) {
+            templateSaveCancel.addEventListener("click", e -> closeTemplateSaveDialog());
+        }
+        Element templateSaveOverlay = document.getElementById("fe-template-save-overlay");
+        if (templateSaveOverlay != null) {
+            templateSaveOverlay.addEventListener("click", e -> closeTemplateSaveDialog());
+        }
+        Element templateSaveOk = document.getElementById("fe-template-save-ok");
+        if (templateSaveOk != null) {
+            templateSaveOk.addEventListener("click", e -> {
+                // 双击的第二下不当作“再次确认覆盖”，避免手快双击直接吞掉同名模板。
+                if (e instanceof MouseEvent me && me.clickCount >= 2) {
+                    return;
+                }
+                saveFilterTemplateFromDialog();
+            });
+        }
+        Element templateSaveName = document.getElementById("fe-template-save-name");
+        if (templateSaveName != null) {
+            templateSaveName.addEventListener("input", e -> onTemplateSaveNameChanged());
+            templateSaveName.addEventListener("keyup", e -> {
+                if (e instanceof KeyEvent ke && "Escape".equals(ke.key)) {
+                    return;
+                }
+                onTemplateSaveNameChanged();
+            });
+            templateSaveName.addEventListener("keydown", e -> {
+                e.stopPropagation();
+                if (!(e instanceof KeyEvent ke)) {
+                    return;
+                }
+                if ("Enter".equals(ke.key)) {
+                    saveFilterTemplateFromDialog();
+                } else if ("Escape".equals(ke.key)) {
+                    closeTemplateSaveDialog();
+                }
+            });
+        }
+        document.addEventListener("keydown", e -> {
+            if (e instanceof KeyEvent ke && "Escape".equalsIgnoreCase(ke.key) && templateSaveDialogOpen) {
+                closeTemplateSaveDialog();
+            }
+        });
+
         // 左键点在菜单外时关闭菜单。
         document.addEventListener("mousedown", e -> {
             if (!(e instanceof MouseEvent me)) {
@@ -790,7 +859,10 @@ public final class FileExplorerController {
         if (next.equals(searchQuery)) {
             return;
         }
+        // 手工改搜索框后，当前规则不再保证与已应用模板完全一致。
+        clearAppliedFilterTemplate();
         searchQuery = next;
+        updateFilterClearButton();
         renderContent();
     }
 
@@ -863,6 +935,8 @@ public final class FileExplorerController {
                 || hit.closest(".fe-columns-overlay") != null
                 || hit.closest(".fe-filter-dialog") != null
                 || hit.closest(".fe-filter-dialog-overlay") != null
+                || hit.closest(".fe-template-save-dialog") != null
+                || hit.closest(".fe-template-save-overlay") != null
                 || hit.closest(".fe-selection-rect") != null
                 || hit.closest(".fe-tooltip") != null
                 || hit.closest(".fe-rename-input") != null
@@ -875,8 +949,8 @@ public final class FileExplorerController {
             if (!(e instanceof KeyEvent ke)) {
                 return;
             }
-            // 列选择 / 筛选条件是模态对话框：键盘操作不能再落到背后的文件列表。
-            if (columnManagerOpen || filterDialogOpen) {
+            // 列选择 / 筛选条件 / 模板命名是模态对话框：键盘操作不能再落到背后的文件列表。
+            if (columnManagerOpen || filterDialogOpen || templateSaveDialogOpen) {
                 return;
             }
             String key = ke.key;
@@ -967,6 +1041,7 @@ public final class FileExplorerController {
                 || active == document.getElementById("fe-rename-input")
                 || active == document.getElementById("fe-address-input")
                 || active == document.getElementById("fe-filter-dialog-search")
+                || active == document.getElementById("fe-template-save-name")
                 || active.getClassList().contains("fe-filter-input")
                 || active.closest(".fe-filter-input") != null;
     }
@@ -1446,7 +1521,9 @@ public final class FileExplorerController {
         sortField = tab.sortField;
         sortAsc = tab.sortAsc;
         foldersFirst = tab.foldersFirst;
+        clearAppliedFilterTemplate();
         searchQuery = tab.searchQuery;
+        updateFilterClearButton();
         lastClickedIndex = tab.lastClickedIndex;
     }
 
@@ -2081,7 +2158,10 @@ public final class FileExplorerController {
                 || hit.closest(".fe-crumb") != null || hit.closest(".fe-status-view") != null
                 || hit.closest(".fe-filter-chip") != null || hit.closest(".fe-filter-more") != null
                 || hit.closest(".fe-filter-clear") != null || hit.closest(".fe-filter-switch-row") != null
-                || hit.closest(".fe-filter-value") != null || hit.closest(".fe-filter-history-value") != null) {
+                || hit.closest(".fe-filter-value") != null || hit.closest(".fe-filter-history-value") != null
+                || hit.closest(".fe-filter-action") != null
+                || hit.closest(".fe-conflict-btn") != null
+                || hit.closest(".fe-template-save-close") != null) {
             return "pointer";
         }
         return null;
@@ -2250,7 +2330,7 @@ public final class FileExplorerController {
         ExplorerSession.clearClipboard();
         afterMutation();
         if (filterOpen) {
-            // 权威视图换了，筛选窗格里的候选/创造页标题也要按新视图重读。
+            // 权威视图换了，筛选窗格里的候选/创造标签页标题也要按新视图重读。
             renderFilterPane();
             if (filterDialogOpen) {
                 renderFilterDialog();
@@ -3329,6 +3409,7 @@ public final class FileExplorerController {
             // 筛选关闭后内容必须重绘，相关调用点会据此补一次 renderContent。
             filterOpen = false;
             closeFilterDialog();
+            closeTemplateSaveDialog();
         }
         detailsPaneOpen = state.showDetails;
         navWidth = state.navWidth;
@@ -3571,7 +3652,7 @@ public final class FileExplorerController {
         }
         Element filter = document.getElementById("fe-filter-pane");
         if (filter != null) {
-            filter.setInlineStyleProperty("display", filterOpen ? "block" : "none");
+            filter.setInlineStyleProperty("display", filterOpen ? "flex" : "none");
         }
         Element resizer = document.getElementById("fe-preview-resizer");
         if (resizer != null) {
@@ -3592,6 +3673,7 @@ public final class FileExplorerController {
         filterOpen = !filterOpen;
         if (!filterOpen) {
             closeFilterDialog();
+            closeTemplateSaveDialog();
         }
         if (filterOpen && previewOpen) {
             // 两个窗格抢同一个位置：打开筛选就收起预览。
@@ -3602,16 +3684,22 @@ public final class FileExplorerController {
         renderContent();
     }
 
-    /** 筛选窗格：顶部开关 + 三组条件（标签 / 模组 / 创造页）。 */
+    /** 筛选窗格：顶部两个开关 + 三组条件 + 模板选择 + 底部操作。 */
     private void renderFilterPane() {
         Element pane = document.getElementById("fe-filter-pane");
         if (pane == null) {
             return;
         }
         double scroll = pane.getScrollTop();
+        Element oldScroll = pane.querySelector(".fe-filter-scroll");
+        if (oldScroll != null) {
+            scroll = oldScroll.getScrollTop();
+        }
         Element active = document.getActiveElement();
         ExplorerFilterSelection.Kind focusedKind = active == null
                 ? null : ExplorerFilterSelection.Kind.byKey(active.getAttribute("data-filter-input"));
+        boolean templateFocused = active != null
+                && active == document.getElementById("fe-filter-template-input");
         java.util.Map<ExplorerFilterSelection.Kind, String> typed = new java.util.EnumMap<>(ExplorerFilterSelection.Kind.class);
         for (Element input : pane.querySelectorAll(".fe-filter-input")) {
             ExplorerFilterSelection.Kind kind = ExplorerFilterSelection.Kind.byKey(input.getAttribute("data-filter-input"));
@@ -3619,26 +3707,27 @@ public final class FileExplorerController {
                 typed.put(kind, input.getValue());
             }
         }
+        Element oldTemplateInput = document.getElementById("fe-filter-template-input");
+        String templateTyped = oldTemplateInput == null ? "" : oldTemplateInput.getValue();
 
         StringBuilder sb = new StringBuilder();
+        sb.append("<div class=\"fe-filter-scroll\">");
         sb.append("<div class=\"fe-filter-head\">");
         sb.append("<span class=\"fe-filter-title\">").append(escape(t("informationera.fe.filter"))).append("</span>");
-        sb.append("<button class=\"fe-filter-clear\" id=\"fe-filter-clear\" type=\"button\"")
-          .append(filterSelection.isEmpty() ? " disabled" : "")
-          .append(">").append(escape(t("informationera.fe.filter_clear"))).append("</button>");
+        sb.append("<button class=\"fe-filter-clear\" id=\"fe-filter-clear\" type=\"button\">")
+          .append(escape(t("informationera.fe.filter_clear"))).append("</button>");
         sb.append("</div>");
 
-        sb.append("<div class=\"fe-filter-switch-row\" id=\"fe-filter-subfolders\" role=\"switch\" aria-checked=\"")
-          .append(filterSelection.includeSubfolders ? "true" : "false").append("\">");
-        sb.append("<span class=\"fe-filter-switch").append(filterSelection.includeSubfolders ? " on" : "")
-          .append("\"><span class=\"fe-filter-switch-knob\"></span></span>");
-        sb.append("<span class=\"fe-filter-switch-label\">")
-          .append(escape(t("informationera.fe.filter_expand_subfolders"))).append("</span>");
-        sb.append("</div>");
+        appendFilterSwitch(sb, "fe-filter-dedupe", "informationera.fe.filter_dedupe", filterSelection.dedupe);
+        appendFilterSwitch(sb, "fe-filter-subfolders", "informationera.fe.filter_expand_subfolders",
+                filterSelection.includeSubfolders);
 
         for (ExplorerFilterSelection.Kind kind : ExplorerFilterSelection.Kind.values()) {
             appendFilterSection(sb, kind);
         }
+        appendFilterTemplateSection(sb);
+        sb.append("</div>");
+        appendFilterFooter(sb);
         pane.setInnerHTML(sb.toString());
 
         for (Element input : pane.querySelectorAll(".fe-filter-input")) {
@@ -3647,9 +3736,17 @@ public final class FileExplorerController {
                 input.setValue(typed.getOrDefault(kind, ""));
             }
         }
-        pane.setScrollTop(scroll);
+        Element templateInput = document.getElementById("fe-filter-template-input");
+        if (templateInput != null) {
+            templateInput.setValue(templateTyped);
+        }
+        Element scrollPane = pane.querySelector(".fe-filter-scroll");
+        if (scrollPane != null) {
+            scrollPane.setScrollTop(scroll);
+        }
         bindFilterPane();
         applyFilterVisibilityState();
+        updateFilterClearButton();
         if (!filterDialogOpen && focusedKind != null) {
             for (Element input : pane.querySelectorAll(".fe-filter-input")) {
                 if (focusedKind.key().equals(input.getAttribute("data-filter-input"))) {
@@ -3661,7 +3758,127 @@ public final class FileExplorerController {
                     break;
                 }
             }
+        } else if (!filterDialogOpen && templateFocused && templateInput != null) {
+            templateInput.focus();
+            if (!templateTyped.isEmpty()) {
+                updateFilterTemplateSuggestions(templateTyped);
+            }
         }
+    }
+
+    private void appendFilterSwitch(StringBuilder sb, String id, String labelKey, boolean checked) {
+        sb.append("<div class=\"fe-filter-switch-row\" id=\"").append(id).append("\" role=\"switch\" aria-checked=\"")
+          .append(checked ? "true" : "false").append("\">");
+        sb.append("<span class=\"fe-filter-switch").append(checked ? " on" : "")
+          .append("\"><span class=\"fe-filter-switch-knob\"></span></span>");
+        sb.append("<span class=\"fe-filter-switch-label\">").append(escape(t(labelKey))).append("</span>");
+        sb.append("</div>");
+    }
+
+    private void appendFilterTemplateSection(StringBuilder sb) {
+        sb.append("<div class=\"fe-filter-section fe-filter-template-section\">");
+        sb.append("<div class=\"fe-filter-section-head\">");
+        sb.append("<span class=\"fe-filter-section-title\">")
+          .append(escape(t("informationera.fe.filter_templates"))).append("</span>");
+        sb.append("<button class=\"fe-filter-more\" type=\"button\" id=\"fe-filter-template-more\" aria-label=\"")
+          .append(escape(t("informationera.fe.filter_choose"))).append("\">")
+          .append(escape(t("informationera.fe.filter_choose"))).append(" ▾</button>");
+        sb.append("</div>");
+        sb.append("<div class=\"fe-filter-chips\" id=\"fe-filter-template-chips\">");
+        appendFilterTemplateChipContent(sb);
+        sb.append("</div>");
+        sb.append("<div class=\"fe-filter-input-wrap\">");
+        sb.append("<input class=\"form-input-2 fe-filter-input fe-filter-template-input\" id=\"fe-filter-template-input\"")
+          .append(" type=\"text\" placeholder=\"")
+          .append(escape(t("informationera.fe.filter_template_input_placeholder"))).append("\">");
+        sb.append("<div class=\"fe-filter-suggest\" id=\"fe-filter-template-suggest\" style=\"display:none;\"></div>");
+        sb.append("</div></div>");
+    }
+
+    private void appendFilterFooter(StringBuilder sb) {
+        sb.append("<div class=\"fe-filter-footer\">");
+        sb.append("<button class=\"fe-filter-action primary\" id=\"fe-filter-save-template\" type=\"button\">")
+          .append(escape(t("informationera.fe.filter_save_template"))).append("</button>");
+        sb.append("</div>");
+    }
+
+    /** 清除按钮现在负责搜索、条件、两个开关和模板标记，因此状态判断要覆盖全部规则。 */
+    private boolean canClearFilter() {
+        return !searchQuery.isBlank()
+                || !filterSelection.isEmpty()
+                || filterSelection.includeSubfolders
+                || filterSelection.dedupe
+                || appliedFilterTemplate != null;
+    }
+
+    private void updateFilterClearButton() {
+        Element button = document.getElementById("fe-filter-clear");
+        if (button == null) {
+            return;
+        }
+        boolean enabled = canClearFilter();
+        button.setAttribute("aria-disabled", enabled ? "false" : "true");
+        if (enabled) {
+            button.getClassList().remove("disabled");
+        } else {
+            button.getClassList().add("disabled");
+        }
+    }
+
+    private void appendFilterTemplateChipContent(StringBuilder sb) {
+        if (appliedFilterTemplate == null) {
+            sb.append("<span class=\"fe-filter-none\">")
+              .append(escape(t("informationera.fe.filter_template_none"))).append("</span>");
+        } else {
+            sb.append(filterTemplateChipHtml(appliedFilterTemplate));
+        }
+    }
+
+    private String filterTemplateChipHtml(String name) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("<span class=\"fe-filter-chip fe-filter-template-chip\" data-template-chip=\"")
+          .append(escape(name)).append("\" title=\"").append(escape(name)).append("\">");
+        sb.append("<span class=\"fe-filter-chip-text\">").append(escape(name)).append("</span>");
+        sb.append("<span class=\"fe-filter-chip-x\" role=\"button\" aria-label=\"")
+          .append(escape(t("informationera.fe.filter_template_remove"))).append("\">×</span>");
+        sb.append("</span>");
+        return sb.toString();
+    }
+
+    private void updateFilterTemplateChip() {
+        Element chips = document == null ? null : document.getElementById("fe-filter-template-chips");
+        if (chips == null) {
+            return;
+        }
+        StringBuilder sb = new StringBuilder();
+        appendFilterTemplateChipContent(sb);
+        chips.setInnerHTML(sb.toString());
+        bindFilterTemplateChips(chips);
+    }
+
+    private void bindFilterTemplateChips(Element scope) {
+        for (Element chip : scope.querySelectorAll(".fe-filter-template-chip")) {
+            chip.addEventListener("click", e -> {
+                e.stopPropagation();
+                if (appliedFilterTemplate == null) {
+                    return;
+                }
+                clearAppliedFilterTemplate();
+                if (filterDialogOpen && filterDialogTemplates) {
+                    renderFilterDialog();
+                }
+            });
+        }
+    }
+
+    /** 手工改动任一规则后清空“当前应用模板”，避免继续显示为完全匹配。 */
+    private void clearAppliedFilterTemplate() {
+        if (appliedFilterTemplate == null) {
+            return;
+        }
+        appliedFilterTemplate = null;
+        updateFilterTemplateChip();
+        updateFilterClearButton();
     }
 
     private void appendFilterSection(StringBuilder sb, ExplorerFilterSelection.Kind kind) {
@@ -3717,18 +3934,69 @@ public final class FileExplorerController {
         if (clear != null) {
             clear.addEventListener("click", e -> {
                 e.stopPropagation();
-                clearFilterSelection();
+                if ("true".equals(clear.getAttribute("aria-disabled"))) {
+                    return;
+                }
+                resetFilter();
             });
         }
         Element switchRow = pane.querySelector("#fe-filter-subfolders");
         if (switchRow != null) {
             switchRow.addEventListener("click", e -> {
                 e.stopPropagation();
+                clearAppliedFilterTemplate();
                 filterSelection.includeSubfolders = !filterSelection.includeSubfolders;
                 renderFilterPane();
                 renderContent();
             });
         }
+        Element dedupeRow = pane.querySelector("#fe-filter-dedupe");
+        if (dedupeRow != null) {
+            dedupeRow.addEventListener("click", e -> {
+                e.stopPropagation();
+                clearAppliedFilterTemplate();
+                filterSelection.dedupe = !filterSelection.dedupe;
+                renderFilterPane();
+                renderContent();
+            });
+        }
+        Element templateMore = pane.querySelector("#fe-filter-template-more");
+        if (templateMore != null) {
+            templateMore.addEventListener("click", e -> {
+                e.stopPropagation();
+                showFilterTemplateDialog();
+            });
+        }
+        Element templateInput = pane.querySelector("#fe-filter-template-input");
+        if (templateInput != null) {
+            templateInput.addEventListener("input", e -> updateFilterTemplateSuggestions(templateInput.getValue()));
+            templateInput.addEventListener("keyup", e -> {
+                if (e instanceof KeyEvent ke && "Escape".equals(ke.key)) {
+                    return;
+                }
+                updateFilterTemplateSuggestions(templateInput.getValue());
+            });
+            templateInput.addEventListener("focus", e -> updateFilterTemplateSuggestions(templateInput.getValue()));
+            templateInput.addEventListener("keydown", e -> {
+                e.stopPropagation();
+                if (!(e instanceof KeyEvent ke)) {
+                    return;
+                }
+                if ("Enter".equals(ke.key)) {
+                    submitFilterTemplateInput(templateInput);
+                } else if ("Escape".equals(ke.key)) {
+                    showFilterTemplateSuggestions(List.of());
+                }
+            });
+        }
+        Element saveTemplate = pane.querySelector("#fe-filter-save-template");
+        if (saveTemplate != null) {
+            saveTemplate.addEventListener("click", e -> {
+                e.stopPropagation();
+                showTemplateSaveDialog();
+            });
+        }
+        bindFilterTemplateChips(pane);
         for (Element more : pane.querySelectorAll(".fe-filter-more")) {
             ExplorerFilterSelection.Kind kind = ExplorerFilterSelection.Kind.byKey(more.getAttribute("data-filter-more"));
             if (kind != null) {
@@ -3775,14 +4043,6 @@ public final class FileExplorerController {
         }
     }
 
-    private void clearFilterSelection() {
-        if (filterSelection.isEmpty()) {
-            return;
-        }
-        filterSelection.clear();
-        refreshFilterViews();
-    }
-
     private void addFilterValue(ExplorerFilterSelection.Kind kind, String rawValue) {
         if (rawValue != null) {
             addFilterValues(kind, List.of(rawValue));
@@ -3806,6 +4066,7 @@ public final class FileExplorerController {
             }
         }
         if (changed) {
+            clearAppliedFilterTemplate();
             refreshFilterViews();
         }
     }
@@ -3814,7 +4075,329 @@ public final class FileExplorerController {
         if (kind == null || !filterSelection.remove(kind, rawValue)) {
             return;
         }
+        clearAppliedFilterTemplate();
         refreshFilterViews();
+    }
+
+    /** 重置整套筛选规则：条件、搜索、两个开关和当前应用模板都清空；模板本身与历史保留。 */
+    private void resetFilter() {
+        filterSelection.reset();
+        appliedFilterTemplate = null;
+        searchQuery = "";
+        Element search = document.getElementById("fe-search");
+        if (search != null) {
+            search.setValue("");
+        }
+        Element pane = document.getElementById("fe-filter-pane");
+        if (pane != null) {
+            for (Element input : pane.querySelectorAll("input")) {
+                input.setValue("");
+            }
+        }
+        refreshFilterViews();
+    }
+
+    /** 应用模板：整套替换当前规则（搜索、四类条件、平铺、去重），不做递归引用。 */
+    private void applyFilterTemplate(ExplorerFilterTemplate template) {
+        if (template == null) {
+            return;
+        }
+        filterSelection.reset();
+        for (String value : template.tags) {
+            filterSelection.add(ExplorerFilterSelection.Kind.TAG, value);
+        }
+        for (String value : template.mods) {
+            filterSelection.add(ExplorerFilterSelection.Kind.MOD, value);
+        }
+        for (String value : template.tabs) {
+            filterSelection.add(ExplorerFilterSelection.Kind.TAB, value);
+        }
+        for (String value : template.keywords) {
+            filterSelection.add(ExplorerFilterSelection.Kind.KEYWORD, value);
+        }
+        filterSelection.includeSubfolders = template.includeSubfolders;
+        filterSelection.dedupe = template.dedupe;
+        searchQuery = template.search;
+        Element search = document.getElementById("fe-search");
+        if (search != null) {
+            search.setValue(searchQuery);
+        }
+        Element pane = document.getElementById("fe-filter-pane");
+        if (pane != null) {
+            for (Element input : pane.querySelectorAll("input")) {
+                input.setValue("");
+            }
+        }
+        Element dialogSearch = document.getElementById("fe-filter-dialog-search");
+        if (dialogSearch != null) {
+            dialogSearch.setValue("");
+        }
+        appliedFilterTemplate = template.name;
+        ExplorerPreferences.recordFilterUse(ExplorerFilterTemplate.HISTORY_KIND, template.name);
+        refreshFilterViews();
+    }
+
+    private void applyFilterTemplateByName(String name) {
+        ExplorerFilterTemplate template = ExplorerPreferences.filterTemplate(name);
+        if (template == null) {
+            setStatus(t("informationera.fe.filter_template_missing"));
+            return;
+        }
+        applyFilterTemplate(template);
+    }
+
+    // ---------- 保存筛选模板 ----------
+
+    private void showTemplateSaveDialog() {
+        Element dialog = document.getElementById("fe-template-save-dialog");
+        Element overlay = document.getElementById("fe-template-save-overlay");
+        if (dialog == null || overlay == null) {
+            return;
+        }
+        hideTooltip();
+        closeContextMenu();
+        templateSaveDialogOpen = true;
+        templateSaveConfirmOverwrite = false;
+        templateSaveConfirmName = null;
+        Element title = document.getElementById("fe-template-save-title");
+        if (title != null) {
+            title.setTextContent(t("informationera.fe.filter_template_save_title"));
+        }
+        Element message = document.getElementById("fe-template-save-message");
+        if (message != null) {
+            message.setTextContent("");
+        }
+        Element input = document.getElementById("fe-template-save-name");
+        if (input != null) {
+            input.setValue("");
+            input.setPlaceholder(t("informationera.fe.filter_template_name_placeholder"));
+        }
+        Element ok = document.getElementById("fe-template-save-ok");
+        if (ok != null) {
+            ok.setTextContent(t("informationera.fe.filter_template_save"));
+        }
+        Element cancel = document.getElementById("fe-template-save-cancel");
+        if (cancel != null) {
+            cancel.setTextContent(t("informationera.fe.cancel"));
+        }
+        Size viewport = document.getViewportSize();
+        double width = 420;
+        double height = 210;
+        dialog.setInlineStyleProperty("left", px(Math.max(8, (viewport.width() - width) / 2)));
+        dialog.setInlineStyleProperty("top", px(Math.max(8, (viewport.height() - height) / 2)));
+        dialog.setInlineStyleProperty("height", px(height));
+        dialog.setInlineStyleProperty("display", "flex");
+        overlay.setInlineStyleProperty("display", "block");
+        if (input != null) {
+            input.focus();
+        }
+    }
+
+    private void closeTemplateSaveDialog() {
+        templateSaveDialogOpen = false;
+        templateSaveConfirmOverwrite = false;
+        templateSaveConfirmName = null;
+        if (document == null) {
+            return;
+        }
+        Element dialog = document.getElementById("fe-template-save-dialog");
+        Element overlay = document.getElementById("fe-template-save-overlay");
+        if (dialog != null) {
+            dialog.setInlineStyleProperty("display", "none");
+        }
+        if (overlay != null) {
+            overlay.setInlineStyleProperty("display", "none");
+        }
+        Element input = document.getElementById("fe-template-save-name");
+        if (input != null) {
+            input.setValue("");
+        }
+    }
+
+    /** 改名后必须重新确认是否覆盖同名模板，避免第一次警告后改个名仍沿用覆盖状态。 */
+    private void onTemplateSaveNameChanged() {
+        Element input = document.getElementById("fe-template-save-name");
+        String current = input == null || input.getValue() == null ? "" : input.getValue().trim();
+        if (templateSaveConfirmOverwrite && current.equals(templateSaveConfirmName)) {
+            return;
+        }
+        templateSaveConfirmOverwrite = false;
+        templateSaveConfirmName = null;
+        Element message = document.getElementById("fe-template-save-message");
+        if (message != null) {
+            message.setTextContent("");
+        }
+        Element ok = document.getElementById("fe-template-save-ok");
+        if (ok != null) {
+            ok.setTextContent(t("informationera.fe.filter_template_save"));
+        }
+    }
+
+    private void saveFilterTemplateFromDialog() {
+        if (!templateSaveDialogOpen) {
+            return;
+        }
+        Element input = document.getElementById("fe-template-save-name");
+        String name = input == null || input.getValue() == null ? "" : input.getValue().trim();
+        Element message = document.getElementById("fe-template-save-message");
+        if (name.isEmpty()) {
+            templateSaveConfirmOverwrite = false;
+            templateSaveConfirmName = null;
+            if (message != null) {
+                message.setTextContent(t("informationera.fe.filter_template_name_required"));
+            }
+            Element ok = document.getElementById("fe-template-save-ok");
+            if (ok != null) {
+                ok.setTextContent(t("informationera.fe.filter_template_save"));
+            }
+            return;
+        }
+        boolean exists = ExplorerPreferences.filterTemplateExists(name);
+        if (exists && !templateSaveConfirmOverwrite) {
+            // 第一次只警告，第二次才真正覆盖：防止同名保存直接吞掉旧模板。
+            templateSaveConfirmOverwrite = true;
+            templateSaveConfirmName = name;
+            if (message != null) {
+                message.setTextContent(t("informationera.fe.filter_template_exists_confirm"));
+            }
+            Element ok = document.getElementById("fe-template-save-ok");
+            if (ok != null) {
+                ok.setTextContent(t("informationera.fe.filter_template_overwrite"));
+            }
+            return;
+        }
+        ExplorerFilterTemplate template = ExplorerFilterTemplate.capture(name, searchQuery, filterSelection);
+        ExplorerPreferences.saveFilterTemplate(template);
+        appliedFilterTemplate = template.name;
+        closeTemplateSaveDialog();
+        renderFilterPane();
+        if (filterDialogOpen && filterDialogTemplates) {
+            renderFilterDialog();
+        }
+        setStatus(t("informationera.fe.filter_template_saved"));
+    }
+
+    private ExplorerFilterTemplate resolveFilterTemplate(String rawText) {
+        String text = ExplorerFilterSelection.normalize(rawText);
+        if (text == null) {
+            return null;
+        }
+        ExplorerFilterTemplate exact = ExplorerPreferences.filterTemplate(text);
+        if (exact != null) {
+            return exact;
+        }
+        List<String> suggestions = filterTemplateSuggestions(text, 1);
+        return suggestions.isEmpty() ? null : ExplorerPreferences.filterTemplate(suggestions.get(0));
+    }
+
+    private List<String> filterTemplateSuggestions(String rawQuery, int limit) {
+        String query = rawQuery == null ? "" : rawQuery.trim();
+        List<String> result = new ArrayList<>();
+        if (query.isEmpty() || limit <= 0) {
+            return result;
+        }
+        for (String name : ExplorerPreferences.filterTemplateNames()) {
+            if (ExplorerSearch.matches(name, query)) {
+                result.add(name);
+                if (result.size() >= limit) {
+                    break;
+                }
+            }
+        }
+        return result;
+    }
+
+    private void updateFilterTemplateSuggestions(String rawQuery) {
+        hideOtherFilterSuggestions(null);
+        showFilterTemplateSuggestions(filterTemplateSuggestions(rawQuery, 8));
+    }
+
+    private void showFilterTemplateSuggestions(List<String> names) {
+        Element box = document.getElementById("fe-filter-template-suggest");
+        if (box == null) {
+            return;
+        }
+        if (names.isEmpty()) {
+            box.setInnerHTML("");
+            box.setInlineStyleProperty("display", "none");
+            return;
+        }
+        box.setInlineStyleProperty("display", "flex");
+        StringBuilder sb = new StringBuilder();
+        for (String name : names) {
+            sb.append("<button class=\"fe-filter-suggestion\" type=\"button\" data-template-suggest=\"")
+              .append(escape(name)).append("\" title=\"").append(escape(name)).append("\">")
+              .append(escape(name)).append("</button>");
+        }
+        box.setInnerHTML(sb.toString());
+        for (Element button : box.querySelectorAll(".fe-filter-suggestion")) {
+            button.addEventListener("mousedown", e -> e.preventDefault());
+            button.addEventListener("click", e -> {
+                e.stopPropagation();
+                String name = button.getAttribute("data-template-suggest");
+                if (name != null) {
+                    Element input = document.getElementById("fe-filter-template-input");
+                    if (input != null) {
+                        input.setValue("");
+                    }
+                    applyFilterTemplateByName(name);
+                }
+            });
+        }
+    }
+
+    private void submitFilterTemplateInput(Element input) {
+        String text = input == null ? "" : input.getValue();
+        ExplorerFilterTemplate template = resolveFilterTemplate(text);
+        if (template == null) {
+            setStatus(t("informationera.fe.filter_template_missing"));
+            return;
+        }
+        input.setValue("");
+        applyFilterTemplate(template);
+    }
+
+    /** 高频/最近里只展示仍然存在的模板，单行最多 8 个。 */
+    private List<String> existingTemplateHistory(boolean frequent, int limit) {
+        List<String> raw = frequent
+                ? ExplorerPreferences.frequentFilterValues(ExplorerFilterTemplate.HISTORY_KIND, 80)
+                : ExplorerPreferences.recentFilterValues(ExplorerFilterTemplate.HISTORY_KIND, 80);
+        List<String> result = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        for (String name : raw) {
+            ExplorerFilterTemplate template = ExplorerPreferences.filterTemplate(name);
+            if (template == null) {
+                continue;
+            }
+            String key = name.toLowerCase(java.util.Locale.ROOT);
+            if (!seen.add(key)) {
+                continue;
+            }
+            result.add(template.name);
+            if (result.size() >= limit) {
+                break;
+            }
+        }
+        return result;
+    }
+
+    private String filterTemplateHistoryRow(String title, List<String> names) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("<div class=\"fe-filter-dialog-section\">");
+        sb.append("<div class=\"fe-filter-dialog-head\">").append(escape(title)).append("</div>");
+        sb.append("<div class=\"fe-filter-history-row\">");
+        if (names.isEmpty()) {
+            sb.append("<span class=\"fe-filter-none\">").append(escape(t("informationera.fe.filter_none")))
+              .append("</span>");
+        } else {
+            for (String name : names) {
+                sb.append("<button class=\"fe-filter-history-value\" type=\"button\" data-filter-template-history=\"")
+                  .append(escape(name)).append("\" title=\"").append(escape(name)).append("\">")
+                  .append(escape(name)).append("</button>");
+            }
+        }
+        sb.append("</div></div>");
+        return sb.toString();
     }
 
     /** 条件变化后同时刷新窗格、弹窗和内容区；界面上的排序/分组/虚拟滚动全部沿用。 */
@@ -3826,7 +4409,7 @@ public final class FileExplorerController {
         renderContent();
     }
 
-    /** 标签/创造页数据同步后，筛选窗格和候选重新读取；未打开筛选的窗口不需要动作。 */
+    /** 标签/创造标签页数据同步后，筛选窗格和候选重新读取；未打开筛选的窗口不需要动作。 */
     void onFilterDataChanged() {
         if (!filterOpen || document == null) {
             return;
@@ -3840,8 +4423,29 @@ public final class FileExplorerController {
     }
 
     private void updateFilterSuggestions(ExplorerFilterSelection.Kind kind, String rawQuery) {
+        hideOtherFilterSuggestions(kind);
         List<String> suggestions = filterSuggestions(kind, rawQuery, 8);
         showFilterSuggestions(kind, suggestions);
+    }
+
+    /** 只保留当前输入框的补全列表，避免多个输入的浮层同时挂着、点击时命中错误的候选。 */
+    private void hideOtherFilterSuggestions(ExplorerFilterSelection.Kind keep) {
+        Element pane = document.getElementById("fe-filter-pane");
+        if (pane == null) {
+            return;
+        }
+        for (Element box : pane.querySelectorAll(".fe-filter-suggest")) {
+            String kindKey = box.getAttribute("data-filter-suggest");
+            if (kindKey != null && !kindKey.equals(keep == null ? null : keep.key())) {
+                box.setInnerHTML("");
+                box.setInlineStyleProperty("display", "none");
+            }
+        }
+        Element template = document.getElementById("fe-filter-template-suggest");
+        if (template != null) {
+            template.setInnerHTML("");
+            template.setInlineStyleProperty("display", "none");
+        }
     }
 
     private void showFilterSuggestions(ExplorerFilterSelection.Kind kind, List<String> suggestions) {
@@ -3913,73 +4517,41 @@ public final class FileExplorerController {
     }
 
     /**
-     * 把输入文本解析成一组条件值。整段文本能匹配原值或本地化标题时只加一个；
-     * 否则按逗号拆开逐项解析，让「id1, id2」一次回车就能加多个条件。
-     * 单值解析仍保留原始文本作为兜底，允许玩家手动输入当前范围里暂时没有的 id。
+     * 把输入文本解析成一组条件值。整段文本能精确匹配显示文本或稳定 id 时只加一个；
+     * 否则按逗号拆开逐项解析。标签/模组允许手工 id，创造标签页只接受能解析到稳定 id 的值。
      */
     private List<String> resolveFilterValues(ExplorerFilterSelection.Kind kind, String rawText) {
-        String text = ExplorerFilterSelection.normalize(rawText);
-        if (text == null || kind == null) {
+        if (kind == null) {
             return List.of();
         }
-        String exact = resolveKnownFilterValue(kind, text);
-        if (exact != null) {
-            return List.of(exact);
-        }
-        if (text.indexOf(',') >= 0 || text.indexOf('，') >= 0) {
-            java.util.LinkedHashSet<String> values = new java.util.LinkedHashSet<>();
-            for (String part : text.split("[,，]")) {
-                String piece = ExplorerFilterSelection.normalize(part);
-                if (piece == null) {
-                    continue;
-                }
-                String resolved = resolveKnownFilterValue(kind, piece);
-                values.add(resolved == null ? piece : resolved);
-            }
-            if (!values.isEmpty()) {
-                return new ArrayList<>(values);
-            }
-        }
-        List<String> suggestions = filterSuggestions(kind, text, 1);
-        return List.of(suggestions.isEmpty() ? text : suggestions.get(0));
-    }
-
-    /** 输入文本对应已加载候选里的原值或本地化标题；没有精确命中时返回 null。 */
-    private String resolveKnownFilterValue(ExplorerFilterSelection.Kind kind, String text) {
-        for (String candidate : filterCandidates(kind)) {
-            if (candidate.equalsIgnoreCase(text)) {
-                return candidate;
-            }
-        }
-        for (String candidate : filterCandidates(kind)) {
-            if (ExplorerFilterCatalog.label(kind, candidate).equalsIgnoreCase(text)) {
-                return candidate;
-            }
-        }
-        return null;
+        boolean localizedSearch = kind == ExplorerFilterSelection.Kind.TAB
+                || kind == ExplorerFilterSelection.Kind.KEYWORD;
+        return ExplorerFilterMatching.resolve(rawText, kind != ExplorerFilterSelection.Kind.TAB,
+                filterCandidates(kind), value -> ExplorerFilterCatalog.label(kind, value),
+                localizedSearch);
     }
 
     private List<String> filterSuggestions(ExplorerFilterSelection.Kind kind, String rawQuery, int limit) {
-        String query = rawQuery == null ? "" : rawQuery.trim();
-        List<String> result = new ArrayList<>();
-        if (query.isEmpty() || limit <= 0) {
-            return result;
+        if (kind == null) {
+            return List.of();
         }
-        for (String value : filterCandidates(kind)) {
-            String label = ExplorerFilterCatalog.label(kind, value);
-            if (ExplorerSearch.matches(value, query) || ExplorerSearch.matches(label, query)) {
-                result.add(value);
-                if (result.size() >= limit) {
-                    break;
-                }
-            }
-        }
-        return result;
+        // 显示文本是补全的唯一匹配面：标签/模组显示英文 id，标签页/关键词显示当前本地化文本；
+        // 拼音/首字母只用于标签页和关键词，标签/模组仍保持 id 的原文匹配语义。
+        boolean localizedSearch = kind == ExplorerFilterSelection.Kind.TAB
+                || kind == ExplorerFilterSelection.Kind.KEYWORD;
+        return ExplorerFilterMatching.suggestions(rawQuery, limit, filterCandidates(kind),
+                value -> ExplorerFilterCatalog.label(kind, value),
+                localizedSearch);
     }
 
     private List<String> filterCandidates(ExplorerFilterSelection.Kind kind) {
         if (kind == null) {
             return List.of();
+        }
+        int languageVersion = ExplorerKeywordIndex.languageVersion();
+        if (languageVersion != filterCandidateLanguageVersion) {
+            filterCandidateLanguageVersion = languageVersion;
+            filterCandidateCache.clear();
         }
         List<String> cached = filterCandidateCache.get(kind);
         if (cached != null) {
@@ -4006,6 +4578,7 @@ public final class FileExplorerController {
         hideTooltip();
         closeContextMenu();
         filterDialogKind = kind;
+        filterDialogTemplates = false;
         filterDialogOpen = true;
         Element title = document.getElementById("fe-filter-dialog-title");
         if (title != null) {
@@ -4032,10 +4605,197 @@ public final class FileExplorerController {
         }
     }
 
+    private void showFilterTemplateDialog() {
+        Element dialog = document.getElementById("fe-filter-dialog");
+        Element overlay = document.getElementById("fe-filter-dialog-overlay");
+        if (dialog == null || overlay == null) {
+            return;
+        }
+        hideTooltip();
+        closeContextMenu();
+        filterDialogTemplates = true;
+        filterDialogOpen = true;
+        Element title = document.getElementById("fe-filter-dialog-title");
+        if (title != null) {
+            title.setTextContent(t("informationera.fe.filter_template_dialog_title"));
+        }
+        renderFilterDialog();
+        Element dialogBody = document.getElementById("fe-filter-dialog-body");
+        if (dialogBody != null) {
+            dialogBody.setScrollTop(0);
+        }
+        Size viewport = document.getViewportSize();
+        double width = 560;
+        double height = Math.min(620, Math.max(280, viewport.height() - 120));
+        double left = Math.max(8, (viewport.width() - width) / 2);
+        double top = Math.max(8, (viewport.height() - height) / 2);
+        dialog.setInlineStyleProperty("left", px(left));
+        dialog.setInlineStyleProperty("top", px(top));
+        dialog.setInlineStyleProperty("height", px(height));
+        dialog.setInlineStyleProperty("display", "flex");
+        overlay.setInlineStyleProperty("display", "block");
+        Element search = document.getElementById("fe-filter-dialog-search");
+        if (search != null) {
+            search.focus();
+        }
+    }
+
+    /** 模板弹窗：复用五段结构，但“候选全集”是已保存模板，点击即整套应用。 */
+    private void renderFilterTemplateDialog(Element body, String typed, double scroll) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("<div class=\"fe-filter-dialog-search-wrap\">");
+        sb.append("<input class=\"form-input-2 fe-filter-input\" id=\"fe-filter-dialog-search\" type=\"text\" placeholder=\"")
+          .append(escape(t("informationera.fe.filter_template_search_placeholder"))).append("\">");
+        sb.append("<div class=\"fe-filter-suggest fe-filter-dialog-suggest\" id=\"fe-filter-dialog-suggest\" style=\"display:none;\"></div>");
+        sb.append("</div>");
+
+        sb.append("<div class=\"fe-filter-dialog-section\">");
+        sb.append("<div class=\"fe-filter-dialog-head\">")
+          .append(escape(t("informationera.fe.filter_template_selected"))).append("</div>");
+        sb.append("<div class=\"fe-filter-chips\">");
+        appendFilterTemplateChipContent(sb);
+        sb.append("</div></div>");
+
+        sb.append(filterTemplateHistoryRow(t("informationera.fe.filter_frequent"),
+                existingTemplateHistory(true, 8)));
+        sb.append(filterTemplateHistoryRow(t("informationera.fe.filter_recent"),
+                existingTemplateHistory(false, 8)));
+
+        List<String> names = ExplorerPreferences.filterTemplateNames();
+        sb.append("<div class=\"fe-filter-dialog-section fe-filter-dialog-candidates\">");
+        sb.append("<div class=\"fe-filter-dialog-head\">")
+          .append(escape(t("informationera.fe.filter_template_candidates")))
+          .append("<span class=\"fe-filter-count\">").append(names.size()).append("</span></div>");
+        sb.append("<div class=\"fe-filter-value-list\">");
+        if (names.isEmpty()) {
+            sb.append("<span class=\"fe-filter-none\">")
+              .append(escape(t("informationera.fe.filter_template_no_candidates"))).append("</span>");
+        } else {
+            for (String name : names) {
+                boolean applied = appliedFilterTemplate != null && name.equalsIgnoreCase(appliedFilterTemplate);
+                sb.append("<button class=\"fe-filter-value\" type=\"button\" data-filter-template-value=\"")
+                  .append(escape(name)).append("\" title=\"").append(escape(name)).append("\">")
+                  .append(escape(name))
+                  .append(applied ? "<span class=\"fe-filter-check\">✓</span>" : "")
+                  .append("</button>");
+            }
+        }
+        sb.append("</div></div>");
+        body.setInnerHTML(sb.toString());
+        body.setScrollTop(scroll);
+
+        Element search = document.getElementById("fe-filter-dialog-search");
+        if (search != null) {
+            search.setValue(typed);
+            search.addEventListener("input", e -> renderFilterTemplateDialogSuggestions(search.getValue()));
+            search.addEventListener("keyup", e -> {
+                if (e instanceof KeyEvent ke && "Escape".equals(ke.key)) {
+                    return;
+                }
+                renderFilterTemplateDialogSuggestions(search.getValue());
+            });
+            search.addEventListener("keydown", e -> {
+                e.stopPropagation();
+                if (!(e instanceof KeyEvent ke)) {
+                    return;
+                }
+                if ("Enter".equals(ke.key)) {
+                    ExplorerFilterTemplate template = resolveFilterTemplate(search.getValue());
+                    if (template != null) {
+                        search.setValue("");
+                        applyFilterTemplate(template);
+                    } else {
+                        setStatus(t("informationera.fe.filter_template_missing"));
+                    }
+                } else if ("Escape".equals(ke.key)) {
+                    Element suggest = document.getElementById("fe-filter-dialog-suggest");
+                    boolean showing = suggest != null && suggest.querySelector(".fe-filter-suggestion") != null;
+                    if (showing) {
+                        renderFilterTemplateDialogSuggestions("");
+                    } else {
+                        closeFilterDialog();
+                    }
+                }
+            });
+            if (!typed.isEmpty() && filterDialogOpen) {
+                renderFilterTemplateDialogSuggestions(typed);
+            }
+            if (filterDialogOpen) {
+                search.focus();
+            }
+        }
+        for (Element chip : body.querySelectorAll(".fe-filter-template-chip")) {
+            chip.addEventListener("click", e -> {
+                e.stopPropagation();
+                clearAppliedFilterTemplate();
+                renderFilterDialog();
+            });
+        }
+        for (Element button : body.querySelectorAll(".fe-filter-history-value[data-filter-template-history]")) {
+            button.addEventListener("click", e -> {
+                e.stopPropagation();
+                String name = button.getAttribute("data-filter-template-history");
+                if (name != null) {
+                    applyFilterTemplateByName(name);
+                }
+            });
+        }
+        for (Element button : body.querySelectorAll(".fe-filter-value[data-filter-template-value]")) {
+            button.addEventListener("click", e -> {
+                e.stopPropagation();
+                String name = button.getAttribute("data-filter-template-value");
+                if (name != null) {
+                    applyFilterTemplateByName(name);
+                }
+            });
+        }
+    }
+
+    private void renderFilterTemplateDialogSuggestions(String rawQuery) {
+        Element box = document.getElementById("fe-filter-dialog-suggest");
+        if (box == null) {
+            return;
+        }
+        List<String> names = filterTemplateSuggestions(rawQuery, 10);
+        if (names.isEmpty()) {
+            box.setInnerHTML("");
+            box.setInlineStyleProperty("display", "none");
+            return;
+        }
+        box.setInlineStyleProperty("display", "flex");
+        StringBuilder sb = new StringBuilder();
+        for (String name : names) {
+            sb.append("<button class=\"fe-filter-suggestion\" type=\"button\" data-template-suggest=\"")
+              .append(escape(name)).append("\" title=\"").append(escape(name)).append("\">")
+              .append(escape(name)).append("</button>");
+        }
+        box.setInnerHTML(sb.toString());
+        for (Element button : box.querySelectorAll(".fe-filter-suggestion")) {
+            button.addEventListener("mousedown", e -> e.preventDefault());
+            button.addEventListener("click", e -> {
+                e.stopPropagation();
+                String name = button.getAttribute("data-template-suggest");
+                if (name != null) {
+                    Element search = document.getElementById("fe-filter-dialog-search");
+                    if (search != null) {
+                        search.setValue("");
+                    }
+                    applyFilterTemplateByName(name);
+                }
+            });
+        }
+    }
+
     private void renderFilterDialog() {
         Element body = document.getElementById("fe-filter-dialog-body");
         if (body == null || !filterDialogOpen) {
             return;
+        }
+        Element dialogTitle = document.getElementById("fe-filter-dialog-title");
+        if (dialogTitle != null) {
+            dialogTitle.setTextContent(filterDialogTemplates
+                    ? t("informationera.fe.filter_template_dialog_title")
+                    : t("informationera.fe.filter_dialog_title", t(filterDialogKind.labelKey())));
         }
         ExplorerFilterSelection.Kind kind = filterDialogKind;
         String typed = "";
@@ -4044,6 +4804,10 @@ public final class FileExplorerController {
             typed = oldSearch.getValue();
         }
         double scroll = body.getScrollTop();
+        if (filterDialogTemplates) {
+            renderFilterTemplateDialog(body, typed, scroll);
+            return;
+        }
         StringBuilder sb = new StringBuilder();
 
         sb.append("<div class=\"fe-filter-dialog-search-wrap\">");
@@ -4220,6 +4984,7 @@ public final class FileExplorerController {
 
     private void closeFilterDialog() {
         filterDialogOpen = false;
+        filterDialogTemplates = false;
         if (document == null) {
             return;
         }
@@ -4461,11 +5226,13 @@ public final class FileExplorerController {
         lastClickedIndex = -1;
         checkedSet.clear();
         lastCheckedIndex = -1;
+        clearAppliedFilterTemplate();
         searchQuery = "";
         Element search = document.getElementById("fe-search");
         if (search != null) {
             search.setValue("");
         }
+        updateFilterClearButton();
         // 记录本窗口导航历史（去重，最近在前）。
         navHistory.remove(currentKey);
         navHistory.add(0, currentKey);
@@ -4724,7 +5491,7 @@ public final class FileExplorerController {
                         + t("informationera.fe.filter_clear") + "</button></div>");
                 Element btn = content.querySelector("#fe-filter-empty-clear");
                 if (btn != null) {
-                    btn.addEventListener("click", e -> clearFilterSelection());
+                    btn.addEventListener("click", e -> resetFilter());
                 }
             } else {
                 content.setInnerHTML("<div class=\"fe-empty\">" + t("informationera.fe.empty_folder") + "</div>");
@@ -5086,7 +5853,7 @@ public final class FileExplorerController {
             entries.removeIf(entry -> !ExplorerSearch.matches(entry.name, query));
         }
         if (filterOpen && !filterSelection.isEmpty()) {
-            // 有任意条件时只保留满足条件的物品；文件夹没有标签/模组/创造页，自然被排除。
+            // 有任意条件时只保留满足条件的物品；文件夹没有标签/模组/创造标签页/关键词，自然被排除。
             entries.removeIf(entry -> entry.folder || !matchesFilter(entry));
         }
         // 有分组时先确定组顺序，再让每组复用当前列排序（包括第三方列），
@@ -5107,12 +5874,26 @@ public final class FileExplorerController {
         } else {
             sortEntries(entries);
         }
+        if (filterOpen && filterSelection.dedupe) {
+            // 仅视觉去重：在搜索/筛选/排序之后按真实 ItemKey 保留一个代表。
+            ExplorerItemDedupe.retainFirstByItemKey(entries,
+                    entry -> entry.folder || entry.itemKey == null,
+                    entry -> entry.itemKey);
+        }
         return entries;
     }
 
     private boolean matchesFilter(VirtualFileSystem.Entry entry) {
         ExplorerFilterCatalog.Facts facts = ExplorerFilterCatalog.facts(entry);
-        return filterSelection.matches(facts.modId, facts.tags, facts.tabs);
+        if (!filterSelection.matches(facts.modId, facts.tags, facts.tabs)) {
+            return false;
+        }
+        java.util.Set<String> keywords = filterSelection.values(ExplorerFilterSelection.Kind.KEYWORD);
+        if (keywords.isEmpty()) {
+            return true;
+        }
+        String name = ExplorerKeywordIndex.localizedName(entry.itemId);
+        return ExplorerKeywordIndex.matchesAny(keywords, name);
     }
 
     /**
@@ -6458,6 +7239,7 @@ public final class FileExplorerController {
      */
     void tickTooltip() {
         ExplorerPreferences.tick();
+        checkFilterLanguage();
         ExplorerItemTooltip.tick(document);
         if (!tooltipVisible || tooltip == null || document == null || !document.isActive()) {
             return;
@@ -6471,6 +7253,29 @@ public final class FileExplorerController {
         if (hit == null || hit.closest(".fe-item") == null) {
             hideTooltip();
         }
+    }
+
+    /**
+     * 语种切换/资源重载后，关键词候选和本地化名称都变了。
+     *
+     * <p>筛选窗格或弹窗开着时立即重绘；内容区也要重算，因为已选关键词按本地化名称匹配。
+     */
+    private void checkFilterLanguage() {
+        int version = ExplorerKeywordIndex.languageVersion();
+        if (version == filterLanguageVersion) {
+            return;
+        }
+        filterLanguageVersion = version;
+        filterCandidateLanguageVersion = version;
+        filterCandidateCache.clear();
+        if (!filterOpen || document == null) {
+            return;
+        }
+        renderFilterPane();
+        if (filterDialogOpen) {
+            renderFilterDialog();
+        }
+        renderContent();
     }
 
     private void showTabGhost(String title, double x, double y) {

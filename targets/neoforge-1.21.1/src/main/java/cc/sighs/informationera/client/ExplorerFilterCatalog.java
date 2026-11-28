@@ -25,13 +25,13 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * 筛选条件的实时目录：物品 → 模组 / 标签 / 创造模式标签页。
+ * 筛选条件的实时目录：物品 → 模组 / 标签 / 创造标签页 / 关键词。
  *
- * <p>标签来自物品栈实际持有的 {@code TagKey}，创造页来自
+ * <p>标签来自物品栈实际持有的 {@code TagKey}，创造标签页来自
  * {@link BuiltInRegistries#CREATIVE_MODE_TAB} 的展示物品。两者都会在数据包 / 标签同步后
  * 变化，因此 {@link TagsUpdatedEvent} 到达时整体失效缓存，下一次筛选重新读取。
  *
- * <p>任何单个物品、标签或创造页读取失败都只影响它自己：这里逐项捕获异常，返回可用的
+ * <p>任何单个物品、标签或创造标签页读取失败都只影响它自己：这里逐项捕获异常，返回可用的
  * 空集合，绝不让筛选界面因为一个异常物品打不开。
  */
 @EventBusSubscriber(modid = InformationEraNeoForge121.MOD_ID, value = Dist.CLIENT)
@@ -59,7 +59,7 @@ public final class ExplorerFilterCatalog {
     private ExplorerFilterCatalog() {
     }
 
-    /** 标签或创造页数据变化：清空全部派生缓存。 */
+    /** 标签或创造标签页数据变化：清空全部派生缓存。 */
     static void invalidate() {
         FACTS.clear();
         TABS_BY_ITEM.clear();
@@ -97,8 +97,8 @@ public final class ExplorerFilterCatalog {
             return cached;
         }
         Facts built = buildFacts(itemId, key);
-        // 创造页还没重建成功时（例如尚未进入世界），只返回本次结果，不能把空的 tabs
-        // 永久写进缓存；否则之后即使重建成功，这个物品也会一直缺少创造页条件。
+        // 创造标签页还没重建成功时（例如尚未进入世界），只返回本次结果，不能把空的 tabs
+        // 永久写进缓存；否则之后即使重建成功，这个物品也会一直缺少创造标签页条件。
         if (creativeLoaded) {
             FACTS.put(itemId, built);
         }
@@ -136,11 +136,11 @@ public final class ExplorerFilterCatalog {
     }
 
     /**
-     * 构建物品 → 创造页的反向索引；只在数据失效后重建一次。
+     * 构建物品 → 创造标签页的反向索引；只在数据失效后重建一次。
      *
-     * <p>创造页的物品列表由 {@link CreativeModeTabs#tryRebuildTabContents} 在打开创造背包时
+     * <p>创造标签页的物品列表由 {@link CreativeModeTabs#tryRebuildTabContents} 在打开创造背包时
      * 才填充，生存模式通常永远走不到那一步。这里主动按当前世界参数重建一次，否则筛选弹窗
-     * 里的创造页候选会一直是空的。重建失败或还没进世界时保持未加载，下一次查询再试。
+     * 里的创造标签页候选会一直是空的。重建失败或还没进世界时保持未加载，下一次查询再试。
      */
     private static void ensureCreativeTabs() {
         if (creativeLoaded) {
@@ -206,7 +206,7 @@ public final class ExplorerFilterCatalog {
 
     /**
      * 条件的显示文本：标签和模组一律显示实际英文 id（存储、匹配、搜索都用同一份值），
-     * 只有创造模式标签页换成玩家语言的标题。
+     * 只有创造标签页换成玩家语言的标题。
      */
     static String label(ExplorerFilterSelection.Kind kind, String value) {
         if (value == null) {
@@ -226,7 +226,7 @@ public final class ExplorerFilterCatalog {
                 }
             }
         } catch (RuntimeException | LinkageError brokenLabel) {
-            // 创造页被移除或注册表未就绪：退回显示稳定 id。
+            // 创造标签页被移除或注册表未就绪：退回显示稳定 id。
         }
         return value;
     }
@@ -241,6 +241,10 @@ public final class ExplorerFilterCatalog {
                                    ExplorerFilterSelection.Kind kind) {
         if (entries == null || entries.isEmpty() || kind == null) {
             return List.of();
+        }
+        if (kind == ExplorerFilterSelection.Kind.KEYWORD) {
+            // 关键词候选必须保持目录词频顺序，不能走下面的字母排序。
+            return ExplorerKeywordIndex.candidates(entries);
         }
         Set<String> values = new LinkedHashSet<>();
         for (VirtualFileSystem.Entry entry : entries) {

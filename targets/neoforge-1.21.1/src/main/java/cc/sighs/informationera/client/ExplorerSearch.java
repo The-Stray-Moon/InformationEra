@@ -30,19 +30,19 @@ final class ExplorerSearch {
         if (query.isEmpty()) {
             return true;
         }
-        String text = name == null ? "" : name;
-        String lowerName = text.toLowerCase(Locale.ROOT);
-        String lowerQuery = query.toLowerCase(Locale.ROOT);
-        if (hasWildcard(query)) {
-            return wildcardMatch(lowerName, lowerQuery);
-        }
-        // 先走原名：JECh 只做增量，不改变原有名称搜索的命中范围。
-        if (lowerName.contains(lowerQuery)) {
+        if (matchesPlain(name, query)) {
             return true;
         }
+        // 通配符只按本地原名处理；JECh 入口不支持 * / ?。
+        if (hasWildcard(query)) {
+            return false;
+        }
+        String text = name == null ? "" : name;
         if (JECH_CONTAINS != null && !jechBroken) {
             try {
-                if (Boolean.TRUE.equals(JECH_CONTAINS.invoke(null, text, query, Boolean.TRUE))) {
+                // 拼音查询统一用小写交给 JECh；本地原名路径已做过大小写不敏感匹配。
+                String jechQuery = query.toLowerCase(Locale.ROOT);
+                if (Boolean.TRUE.equals(JECH_CONTAINS.invoke(null, text, jechQuery, Boolean.TRUE))) {
                     return true;
                 }
             } catch (ReflectiveOperationException | LinkageError e) {
@@ -51,6 +51,26 @@ final class ExplorerSearch {
             }
         }
         return false;
+    }
+
+    /**
+     * 只做本地原名/通配符匹配，不调用 JECh。
+     *
+     * <p>标签和模组 id 必须保持英文标识符语义，不能因为安装了 JECh 就让拼音查询
+     * 误命中 id；创造标签页才使用带 JECh 的 {@link #matches} 匹配本地化名称。
+     */
+    static boolean matchesPlain(String name, String rawQuery) {
+        String query = rawQuery == null ? "" : rawQuery.trim();
+        if (query.isEmpty()) {
+            return true;
+        }
+        String text = name == null ? "" : name;
+        String lowerName = text.toLowerCase(Locale.ROOT);
+        String lowerQuery = query.toLowerCase(Locale.ROOT);
+        if (hasWildcard(query)) {
+            return wildcardMatch(lowerName, lowerQuery);
+        }
+        return lowerName.contains(lowerQuery);
     }
 
     private static Method findJechContains() {
