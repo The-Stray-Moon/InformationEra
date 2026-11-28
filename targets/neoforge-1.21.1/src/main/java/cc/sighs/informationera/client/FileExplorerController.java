@@ -4933,16 +4933,18 @@ public final class FileExplorerController {
         if (entry == null || tooltip == null) {
             return;
         }
+        String location = !entry.folder && !searchQuery.isBlank()
+                ? t("informationera.fe.detail_location", pathText(currentKey) + " > " + entry.name) : null;
         if (!entry.folder) {
             ItemStack stack = stackForEntry(entry);
             if (!stack.isEmpty()) {
                 hideDomTooltip();
-                ExplorerItemTooltip.show(document, row, stack);
+                ExplorerItemTooltip.show(document, row, stack, location);
                 return;
             }
         }
         ExplorerItemTooltip.hide(document);
-        tooltip.setTextContent(metadataText(entry));
+        tooltip.setTextContent(location == null ? metadataText(entry) : metadataText(entry) + '\n' + location);
         moveTooltip(x, y);
         tooltip.setInlineStyleProperty("display", "block");
         tooltipVisible = true;
@@ -4963,10 +4965,6 @@ public final class FileExplorerController {
                 ? t("informationera.fe.folder")
                 : t("informationera.fe.detail_size", formatSize(entry.size)));
         sb.append('\n').append(t("informationera.fe.detail_modified_short", entry.modified));
-        if (!entry.folder) {
-            // 物品条目补一行操作说明：Alt+左键能把它取到玩家物品栏。
-            sb.append('\n').append(t("informationera.tooltip.alt_withdraw"));
-        }
         return sb.toString();
     }
 

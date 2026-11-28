@@ -45,6 +45,7 @@ public final class ExplorerItemTooltip {
     /** 鼠标下的条目行（AUI 的 {@code .fe-item}）。 */
     private static Element row;
     private static ItemStack stack = ItemStack.EMPTY;
+    private static String location;
     /** 正在拼装/绘制提示框的层数；供 {@link DepositHintTooltip} 判断该不该塞「存入」提示。 */
     private static int renderDepth;
     /**
@@ -60,7 +61,7 @@ public final class ExplorerItemTooltip {
     }
 
     /** 开始（或切换）显示某一行的物品提示。 */
-    static void show(Document doc, Element itemRow, ItemStack itemStack) {
+    static void show(Document doc, Element itemRow, ItemStack itemStack, String fileLocation) {
         if (doc == null || itemRow == null || itemStack == null || itemStack.isEmpty()) {
             hide(doc);
             return;
@@ -68,6 +69,7 @@ public final class ExplorerItemTooltip {
         document = doc;
         row = itemRow;
         stack = itemStack;
+        location = fileLocation;
     }
 
     /** 收起本窗口的物品提示；{@code doc} 为 null 时无条件收起。 */
@@ -76,6 +78,7 @@ public final class ExplorerItemTooltip {
             document = null;
             row = null;
             stack = ItemStack.EMPTY;
+            location = null;
         }
     }
 
@@ -156,9 +159,9 @@ public final class ExplorerItemTooltip {
             if (lines.isEmpty()) {
                 return;
             }
-            // 资源管理器里的 Alt+左键是取出；这一条仍然适用，接在原版行后面。
-            lines.add(Component.translatable("informationera.tooltip.alt_withdraw")
-                    .withStyle(ChatFormatting.GRAY));
+            if (location != null) {
+                lines.add(Component.literal(location).withStyle(ChatFormatting.GRAY));
+            }
             graphics.renderTooltip(mc.font, lines, stack.getTooltipImage(), stack,
                     (int) mouse.x, (int) mouse.y);
         } finally {
