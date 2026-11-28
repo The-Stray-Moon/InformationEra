@@ -7,6 +7,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -25,7 +26,7 @@ public class ExplorerViewStateTest {
         ExplorerViewState state = ExplorerViewState.decode(LEGACY);
         assertEquals("informationera:size", state.sortField);
         assertFalse(state.sortAsc);
-        assertEquals("type", state.groupBy);
+        assertEquals(ExplorerViewState.GROUP_TYPE, state.groupBy);
         assertEquals(470.0, state.width(NAME, 0));
         assertEquals(ExplorerViewState.BUILT_IN_COLUMN_WIDTHS[6],
                 state.width("informationera:registry_id", 0));
@@ -38,7 +39,7 @@ public class ExplorerViewStateTest {
         assertEquals(ExplorerViewState.BUILT_IN_COLUMN_ORDER, state.columnOrder);
 
         String encoded = state.encode();
-        assertTrue(encoded.startsWith("v2|"));
+        assertTrue(encoded.startsWith("v3|"));
         assertTrue(encoded.contains("informationera:name,informationera:modified"));
     }
 
@@ -84,6 +85,36 @@ public class ExplorerViewStateTest {
         assertTrue(state.visible(NAME, false));
         assertTrue(state.visible("informationera:modified", false));
         assertEquals(NAME, state.columnOrder.get(0));
+    }
+
+    @Test
+    public void groupBasisAndReverseDirectionRoundTrip() {
+        ExplorerViewState state = ExplorerViewState.defaults();
+        state.groupBy = ExplorerViewState.GROUP_DURABILITY;
+        state.groupReverse = true;
+
+        ExplorerViewState decoded = ExplorerViewState.decode(state.encode());
+        assertEquals(ExplorerViewState.GROUP_DURABILITY, decoded.groupBy);
+        assertTrue(decoded.groupReverse);
+        assertEquals(state, decoded);
+    }
+
+    @Test
+    public void version2GroupNamesMigrateAndUnknownExtensionIdsSurvive() {
+        String v2 = "v2|details|informationera:name|1|1|type|informationera:name|"
+                + "informationera:name,320,1";
+        ExplorerViewState mapped = ExplorerViewState.decode(v2);
+        assertEquals(ExplorerViewState.GROUP_TYPE, mapped.groupBy);
+        assertFalse(mapped.groupReverse);
+
+        ExplorerViewState external = ExplorerViewState.defaults();
+        external.groupBy = "samplecolumns:energy";
+        ExplorerViewState decoded = ExplorerViewState.decode(external.encode());
+        assertEquals("samplecolumns:energy", decoded.groupBy,
+                "unregistered extension IDs must stay so reinstalling restores grouping");
+
+        ExplorerViewState malformed = ExplorerViewState.decode("v3|details|informationera:name|1|1|not a group|0||");
+        assertNull(malformed.groupBy);
     }
 
     @Test

@@ -43,4 +43,19 @@ public interface ExplorerColumnContext {
 
     /** 物品最大耐久；无耐久或取不到物品时为 0。 */
     int maxDamage();
+
+    /**
+     * 条目真实父文件夹的稳定 key。
+     *
+     * <p>展开子树/搜索时仍是实际来源目录，不是当前视图所在目录；未知时为空串。
+     * 分组依据「所在文件夹」用它做组身份，因此两个同名子目录不会合并。
+     */
+    default String parentId() {
+        return "";
+    }
+
+    /** 真实父文件夹的可读路径（本地化，使用当前语言）；未知时为空串。 */
+    default String parentPath() {
+        return "";
+    }
 }

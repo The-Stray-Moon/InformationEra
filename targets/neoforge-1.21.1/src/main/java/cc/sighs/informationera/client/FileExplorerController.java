@@ -2,6 +2,7 @@ package cc.sighs.informationera.client;
 
 import cc.sighs.informationera.api.client.ExplorerColumn;
 import cc.sighs.informationera.api.client.ExplorerColumnContext;
+import cc.sighs.informationera.api.client.ExplorerGroup;
 import cc.sighs.informationera.util.ItemStacks;
 import com.sighs.apricityui.element.Item;
 import com.sighs.apricityui.event.Event;
@@ -25,6 +26,7 @@ import static cc.sighs.informationera.client.FileExplorerText.t;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.Deque;
 import java.util.HashSet;
 import java.util.List;
@@ -178,7 +180,12 @@ public final class FileExplorerController {
     private boolean compact = false;
     private boolean detailsPaneOpen = false;
     private String groupBy = null;
+    private boolean groupReverse = false;
+    /** 本次渲染的分组（已按组序排好）；未分组时为空。折叠键为「依据 ID + 桶 ID」。 */
+    private List<ExplorerGrouping.Section> renderedGroups = List.of();
     private final Set<String> collapsedGroups = new HashSet<>();
+    private boolean groupDialogOpen = false;
+    private String groupDialogTyped = "";
     private boolean showExtensions = true;
     private String searchQuery = "";
     private int lastClickedIndex = -1;
@@ -603,7 +610,8 @@ public final class FileExplorerController {
                 Element target = e.target instanceof Element ? (Element) e.target : null;
                 if (target == null || (target.closest(".fe-item") == null
                         && target.closest("th") == null
-                        && target.closest(".fe-group-row") == null)) {
+                        && target.closest(".fe-group-row") == null
+                        && target.closest(".fe-group-div") == null)) {
                     beginRubber(me.clientX, me.clientY, me.controlKey);
                 }
             });
@@ -615,7 +623,9 @@ public final class FileExplorerController {
                     return;
                 }
                 Element target = e.target instanceof Element ? (Element) e.target : null;
-                if (target == null || (target.closest(".fe-item") == null && target.closest(".fe-group-row") == null)) {
+                if (target == null || (target.closest(".fe-item") == null
+                        && target.closest(".fe-group-row") == null
+                        && target.closest(".fe-group-div") == null)) {
                     showContentContextMenu(me.clientX, me.clientY);
                 }
             });
@@ -696,6 +706,65 @@ public final class FileExplorerController {
         document.addEventListener("keydown", e -> {
             if (e instanceof KeyEvent ke && "Escape".equalsIgnoreCase(ke.key) && columnManagerOpen) {
                 closeColumnManager();
+            }
+        });
+
+        // 分组依据弹窗：搜索 / 关闭 / 遮罩 / 全部展开折叠 / 反向组序。
+        Element groupClose = document.getElementById("fe-group-close");
+        if (groupClose != null) {
+            groupClose.addEventListener("click", e -> closeGroupDialog());
+        }
+        Element groupCloseButton = document.getElementById("fe-group-close-button");
+        if (groupCloseButton != null) {
+            groupCloseButton.addEventListener("click", e -> closeGroupDialog());
+        }
+        Element groupOverlay = document.getElementById("fe-group-overlay");
+        if (groupOverlay != null) {
+            groupOverlay.addEventListener("click", e -> closeGroupDialog());
+        }
+        Element groupExpand = document.getElementById("fe-group-expand");
+        if (groupExpand != null) {
+            groupExpand.addEventListener("click", e -> {
+                e.stopPropagation();
+                expandAllGroups();
+            });
+        }
+        Element groupCollapse = document.getElementById("fe-group-collapse");
+        if (groupCollapse != null) {
+            groupCollapse.addEventListener("click", e -> {
+                e.stopPropagation();
+                collapseAllGroups();
+            });
+        }
+        Element groupReverseButton = document.getElementById("fe-group-reverse");
+        if (groupReverseButton != null) {
+            groupReverseButton.addEventListener("click", e -> {
+                e.stopPropagation();
+                toggleGroupReverse();
+                updateGroupReverseButton();
+            });
+        }
+        Element groupSearch = document.getElementById("fe-group-search");
+        if (groupSearch != null) {
+            groupSearch.addEventListener("input", e -> {
+                groupDialogTyped = groupSearch.getValue();
+                renderGroupDialog();
+            });
+            groupSearch.addEventListener("keydown", e -> {
+                e.stopPropagation();
+                if (!(e instanceof KeyEvent ke)) {
+                    return;
+                }
+                if ("Enter".equals(ke.key)) {
+                    selectFirstGroupMatch();
+                } else if ("Escape".equals(ke.key)) {
+                    closeGroupDialog();
+                }
+            });
+        }
+        document.addEventListener("keydown", e -> {
+            if (e instanceof KeyEvent ke && "Escape".equalsIgnoreCase(ke.key) && groupDialogOpen) {
+                closeGroupDialog();
             }
         });
 
@@ -937,6 +1006,8 @@ public final class FileExplorerController {
                 || hit.closest(".fe-filter-dialog-overlay") != null
                 || hit.closest(".fe-template-save-dialog") != null
                 || hit.closest(".fe-template-save-overlay") != null
+                || hit.closest(".fe-group-dialog") != null
+                || hit.closest(".fe-group-overlay") != null
                 || hit.closest(".fe-selection-rect") != null
                 || hit.closest(".fe-tooltip") != null
                 || hit.closest(".fe-rename-input") != null
@@ -949,8 +1020,8 @@ public final class FileExplorerController {
             if (!(e instanceof KeyEvent ke)) {
                 return;
             }
-            // 列选择 / 筛选条件 / 模板命名是模态对话框：键盘操作不能再落到背后的文件列表。
-            if (columnManagerOpen || filterDialogOpen || templateSaveDialogOpen) {
+            // 列选择 / 筛选条件 / 模板命名 / 分组依据是模态对话框：键盘操作不能再落到背后的文件列表。
+            if (columnManagerOpen || filterDialogOpen || templateSaveDialogOpen || groupDialogOpen) {
                 return;
             }
             String key = ke.key;
@@ -2161,7 +2232,10 @@ public final class FileExplorerController {
                 || hit.closest(".fe-filter-value") != null || hit.closest(".fe-filter-history-value") != null
                 || hit.closest(".fe-filter-action") != null
                 || hit.closest(".fe-conflict-btn") != null
-                || hit.closest(".fe-template-save-close") != null) {
+                || hit.closest(".fe-template-save-close") != null
+                || hit.closest(".fe-group-option") != null
+                || hit.closest(".fe-group-close") != null
+                || hit.closest(".fe-group-action") != null) {
             return "pointer";
         }
         return null;
@@ -2583,15 +2657,38 @@ public final class FileExplorerController {
         entries.add(CtxEntry.separator());
         entries.add(CtxEntry.actionChecked(t("informationera.fe.folders_first"), foldersFirst, this::toggleFoldersFirst));
         entries.add(CtxEntry.separator());
-        entries.add(CtxEntry.submenu(t("informationera.fe.group_by"), List.of(
-                CtxEntry.actionChecked(t("informationera.fe.none"), groupBy == null, () -> setGroupBy(null)),
-                CtxEntry.actionChecked(t("informationera.fe.name"), "name".equals(groupBy), () -> setGroupBy("name")),
-                CtxEntry.actionChecked(t("informationera.fe.modified"), "modified".equals(groupBy), () -> setGroupBy("modified")),
-                CtxEntry.actionChecked(t("informationera.fe.created"), "created".equals(groupBy), () -> setGroupBy("created")),
-                CtxEntry.actionChecked(t("informationera.fe.type"), "type".equals(groupBy), () -> setGroupBy("type")),
-                CtxEntry.actionChecked(t("informationera.fe.size"), "size".equals(groupBy), () -> setGroupBy("size")),
-                CtxEntry.actionChecked(t("informationera.fe.author"), "author".equals(groupBy), () -> setGroupBy("author")))));
+        entries.add(CtxEntry.submenu(t("informationera.fe.group_by"), groupMenuEntries()));
         openContextMenu(x, y, entries);
+    }
+
+    private List<CtxEntry> groupMenuEntries() {
+        List<CtxEntry> entries = new ArrayList<>();
+        entries.add(CtxEntry.actionChecked(t("informationera.fe.none"), groupBy == null, () -> setGroupBy(null)));
+        Set<String> listed = new HashSet<>();
+        for (String id : ExplorerColumnService.commonGroupIds()) {
+            ExplorerGroup group = ExplorerColumnService.group(id);
+            if (group == null) {
+                continue;
+            }
+            listed.add(id);
+            entries.add(CtxEntry.actionChecked(ExplorerColumnService.groupLabel(group).getString(),
+                    id.equals(groupBy), () -> setGroupBy(id)));
+        }
+        ExplorerGroup current = ExplorerColumnService.group(groupBy);
+        if (current != null && !listed.contains(current.id())) {
+            entries.add(CtxEntry.actionChecked(ExplorerColumnService.groupLabel(current).getString(),
+                    true, () -> setGroupBy(current.id())));
+        } else if (groupBy != null && current == null) {
+            entries.add(CtxEntry.action(t("informationera.fe.group_unavailable", groupBy), () -> {
+            }));
+        }
+        entries.add(CtxEntry.separator());
+        entries.add(CtxEntry.actionChecked(t("informationera.fe.group_reverse"), groupReverse,
+                this::toggleGroupReverse));
+        entries.add(CtxEntry.action(t("informationera.fe.group_expand_all"), this::expandAllGroups));
+        entries.add(CtxEntry.action(t("informationera.fe.group_collapse_all"), this::collapseAllGroups));
+        entries.add(CtxEntry.action(t("informationera.fe.group_more"), this::showGroupDialog));
+        return entries;
     }
 
     private void toggleFoldersFirst() {
@@ -2689,6 +2786,42 @@ public final class FileExplorerController {
                 } catch (NumberFormatException ignored) {
                 }
             });
+        }
+        // 子菜单默认向右下展开；靠近视口底部/右边时会在悬停后翻到上/左侧，
+        // 避免“更多分组依据…”这类较长的子菜单被窗口裁掉。
+        for (Element item : menu.querySelectorAll(".fe-ctx-item.fe-has-sub")) {
+            Element submenu = item.querySelector(".fe-ctx-submenu");
+            if (submenu != null) {
+                item.addEventListener("mouseover",
+                        e -> Minecraft.getInstance().execute(() -> fitContextSubmenu(submenu)));
+            }
+        }
+    }
+
+    private void fitContextSubmenu(Element submenu) {
+        if (document == null || submenu == null) {
+            return;
+        }
+        Element.DOMRect rect = submenu.getBoundingClientRect();
+        if (rect == null || rect.height <= 0) {
+            return;
+        }
+        Size viewport = document.getViewportSize();
+        double top = 0;
+        if (rect.bottom > viewport.height() - 2) {
+            top = viewport.height() - 2 - rect.bottom;
+        } else if (rect.top < 2) {
+            top = 2 - rect.top;
+        }
+        if (top != 0) {
+            submenu.setInlineStyleProperty("top", px(top));
+        }
+        if (rect.right > viewport.width() - 2) {
+            submenu.setInlineStyleProperty("left", "auto");
+            submenu.setInlineStyleProperty("right", "100%");
+        } else {
+            submenu.setInlineStyleProperty("left", "100%");
+            submenu.setInlineStyleProperty("right", "auto");
         }
     }
 
@@ -3120,11 +3253,12 @@ public final class FileExplorerController {
     }
 
     /** 选中指定分组下的全部条目（以当前渲染结果为准，含筛选后的条目）。 */
-    private void selectGroup(String group) {
+    private void selectGroup(String key) {
         selected.clear();
-        for (VirtualFileSystem.Entry entry : renderedEntryList) {
-            if (group.equals(groupLabel(entry))) {
-                selected.add(entry);
+        for (ExplorerGrouping.Section section : renderedGroups) {
+            if (section.key().equals(key)) {
+                selected.addAll(section.entries);
+                break;
             }
         }
         updateSelectionVisuals();
@@ -3379,6 +3513,7 @@ public final class FileExplorerController {
         sortAsc = state.sortAsc;
         foldersFirst = state.foldersFirst;
         groupBy = state.groupBy;
+        groupReverse = state.groupReverse;
         ExplorerColumnService.ensureStateColumns(state);
         applyColumnState(state);
         if (groupChanged) {
@@ -3566,7 +3701,30 @@ public final class FileExplorerController {
     }
 
     private void setGroupBy(String value) {
-        changeView(state -> state.groupBy = value);
+        changeView(state -> state.groupBy = ExplorerViewState.normalizeGroupBasis(value));
+    }
+
+    private void toggleGroupReverse() {
+        changeView(state -> state.groupReverse = !state.groupReverse);
+    }
+
+    private void expandAllGroups() {
+        collapsedGroups.clear();
+        renderContent();
+    }
+
+    private void collapseAllGroups() {
+        if (renderedGroups.isEmpty()) {
+            return;
+        }
+        for (ExplorerGrouping.Section section : renderedGroups) {
+            collapsedGroups.add(section.key());
+        }
+        renderContent();
+    }
+
+    private boolean groupingActive() {
+        return ExplorerColumnService.group(groupBy) != null;
     }
 
     private void toggleExtensions() {
@@ -5470,7 +5628,9 @@ public final class FileExplorerController {
         if ("slots".equals(viewMode) || "small".equals(viewMode) || "medium".equals(viewMode) || "large".equals(viewMode) || "xlarge".equals(viewMode)) {
             content.getClassList().add("fe-view-" + viewMode);
         }
-        List<VirtualFileSystem.Entry> entries = topLevelEntries();
+        ContentData data = topLevelEntries();
+        List<VirtualFileSystem.Entry> entries = data.entries();
+        renderedGroups = data.groups();
         renderedEntryList.clear();
         renderedEntryList.addAll(entries);
         invalidateFilterCandidates();
@@ -5529,28 +5689,21 @@ public final class FileExplorerController {
             return;
         }
         // 构建虚拟行：分组头行 + 条目行。折叠组跳过其条目行但不破坏总高度。
-        record VRow(String label, VirtualFileSystem.Entry entry, int entryIndex, double height) {
+        record VRow(ExplorerGrouping.Section section, VirtualFileSystem.Entry entry, double height) {
         }
         List<VRow> rows = new ArrayList<>();
-        boolean grouped = groupBy != null && !groupBy.isEmpty();
-        if (grouped) {
-            String currentGroup = null;
-            boolean collapsed = false;
-            for (int i = 0; i < entries.size(); i++) {
-                VirtualFileSystem.Entry entry = entries.get(i);
-                String label = groupLabel(entry);
-                if (!label.equals(currentGroup)) {
-                    currentGroup = label;
-                    collapsed = collapsedGroups.contains(label);
-                    rows.add(new VRow(label, null, -1, GROUP_HEADER_HEIGHT));
-                }
-                if (!collapsed) {
-                    rows.add(new VRow(null, entry, i, ROW_HEIGHT));
+        if (!renderedGroups.isEmpty()) {
+            for (ExplorerGrouping.Section section : renderedGroups) {
+                rows.add(new VRow(section, null, GROUP_HEADER_HEIGHT));
+                if (!collapsedGroups.contains(section.key())) {
+                    for (VirtualFileSystem.Entry entry : section.entries) {
+                        rows.add(new VRow(null, entry, ROW_HEIGHT));
+                    }
                 }
             }
         } else {
-            for (int i = 0; i < entries.size(); i++) {
-                rows.add(new VRow(null, entries.get(i), i, ROW_HEIGHT));
+            for (VirtualFileSystem.Entry entry : entries) {
+                rows.add(new VRow(null, entry, ROW_HEIGHT));
             }
         }
 
@@ -5598,12 +5751,12 @@ public final class FileExplorerController {
         }
         for (int r = start; r < end; r++) {
             VRow row = rows.get(r);
-            if (row.entry() == null) {
+            if (row.section() != null) {
                 // 分组头行。
-                sb.append(groupHeaderDiv(row.label(), collapsedGroups.contains(row.label())));
+                sb.append(groupHeaderDiv(row.section(), collapsedGroups.contains(row.section().key())));
             } else {
                 VirtualFileSystem.Entry entry = row.entry();
-                int i = row.entryIndex();
+                int i = renderedEntryList.indexOf(entry);
                 if (details) {
                     sb.append("<div class=\"fe-item fe-vrow\" data-id=\"e").append(i).append("\"")
                       .append(" data-folder=\"").append(entry.folder ? "1" : "0").append("\"")
@@ -5643,7 +5796,7 @@ public final class FileExplorerController {
                 + escape(ExplorerColumnService.value(column, context)) + "</div>";
     }
 
-    /** 图标/平铺视图的窗口化渲染：按列数估算总行数，只渲染可视行 ± 缓冲。 */
+    /** 图标/平铺视图的窗口化渲染：分组头独占一行，条目按列分块，只渲染可视行 ± 缓冲。 */
     private void renderContentVirtualGrid(List<VirtualFileSystem.Entry> entries) {
         Element content = document.getElementById("fe-content");
         if (content == null) {
@@ -5653,69 +5806,72 @@ public final class FileExplorerController {
         double rowHeight = tiles ? tileRowHeight() : gridRowHeight();
         int cols = Math.max(1, gridColumns(tiles));
 
-        // 分组头行高度按一个行高近似，避免滚动条大幅跳动。
-        record VRow(String label, VirtualFileSystem.Entry entry, int entryIndex) {
+        record VRow(ExplorerGrouping.Section section, List<VirtualFileSystem.Entry> items, double height) {
         }
         List<VRow> rows = new ArrayList<>();
-        boolean grouped = groupBy != null && !groupBy.isEmpty();
-        if (grouped) {
-            String currentGroup = null;
-            boolean collapsed = false;
-            int sinceGroupStart = 0;
-            for (int i = 0; i < entries.size(); i++) {
-                VirtualFileSystem.Entry entry = entries.get(i);
-                String label = groupLabel(entry);
-                if (!label.equals(currentGroup)) {
-                    // 上一组末尾补满行。
-                    currentGroup = label;
-                    collapsed = collapsedGroups.contains(label);
-                    rows.add(new VRow(label, null, -1));
-                    sinceGroupStart = 0;
-                }
-                if (!collapsed) {
-                    rows.add(new VRow(null, entry, i));
-                    sinceGroupStart++;
+        if (!renderedGroups.isEmpty()) {
+            for (ExplorerGrouping.Section section : renderedGroups) {
+                rows.add(new VRow(section, null, GROUP_HEADER_HEIGHT));
+                if (!collapsedGroups.contains(section.key())) {
+                    for (int i = 0; i < section.entries.size(); i += cols) {
+                        rows.add(new VRow(null,
+                                section.entries.subList(i, Math.min(section.entries.size(), i + cols)),
+                                rowHeight));
+                    }
                 }
             }
         } else {
-            for (int i = 0; i < entries.size(); i++) {
-                rows.add(new VRow(null, entries.get(i), i));
+            for (int i = 0; i < entries.size(); i += cols) {
+                rows.add(new VRow(null, entries.subList(i, Math.min(entries.size(), i + cols)), rowHeight));
             }
         }
 
-        int totalRows = (int) Math.ceil(rows.size() / (double) cols);
-        double totalHeight = totalRows * rowHeight;
+        double totalHeight = 0;
+        double[] rowTop = new double[rows.size()];
+        for (int r = 0; r < rows.size(); r++) {
+            rowTop[r] = totalHeight;
+            totalHeight += rows.get(r).height();
+        }
+
         double scrollTop = content.getScrollTop();
         Element.DOMRect rect = content.getBoundingClientRect();
         double viewH = rect != null && rect.height > 0 ? rect.height : 600;
-
-        int startRow = Math.max(0, (int) Math.floor(scrollTop / rowHeight) - VIRTUAL_BUFFER);
-        int endRow = Math.min(totalRows, (int) Math.ceil((scrollTop + viewH) / rowHeight) + VIRTUAL_BUFFER);
+        int start = 0;
+        for (int r = 0; r < rows.size(); r++) {
+            if (rowTop[r] + rows.get(r).height() >= scrollTop - VIRTUAL_BUFFER * rowHeight) {
+                start = r;
+                break;
+            }
+        }
+        int end = rows.size();
+        for (int r = start; r < rows.size(); r++) {
+            if (rowTop[r] >= scrollTop + viewH + VIRTUAL_BUFFER * rowHeight) {
+                end = r;
+                break;
+            }
+        }
 
         StringBuilder sb = new StringBuilder();
         sb.append("<div class=\"").append(tiles ? "fe-tiles fe-vgrid" : "fe-grid fe-vgrid")
           .append("\" style=\"height:").append(Math.round(totalHeight)).append("px;position:relative;display:block;\">");
-        int startIdx = startRow * cols;
-        int endIdx = Math.min(rows.size(), endRow * cols);
-        // 顶部 spacer。
-        double topOffset = startRow * rowHeight;
-        if (topOffset > 0) {
-            sb.append("<div style=\"height:").append(Math.round(topOffset)).append("px;\"></div>");
+        double offset = rowTop[start];
+        if (offset > 0) {
+            sb.append("<div style=\"height:").append(Math.round(offset)).append("px;\"></div>");
         }
-        // 可视范围内的条目。
-        sb.append("<div class=\"fe-vgrid-row\" style=\"display:grid;grid-template-columns:repeat(")
-          .append(cols).append("slots".equals(viewMode) ? ",44px);gap:0;\">" : ",1fr);gap:4px;\">");
-        for (int i = startIdx; i < endIdx; i++) {
-            VRow row = rows.get(i);
-            if (row.entry() == null) {
-                sb.append(groupHeaderDiv(row.label(), collapsedGroups.contains(row.label())));
-            } else if (tiles) {
-                sb.append(tileItemHtml(row.entry()));
+        for (int r = start; r < end; r++) {
+            VRow row = rows.get(r);
+            if (row.section() != null) {
+                sb.append(groupHeaderDiv(row.section(), collapsedGroups.contains(row.section().key())));
             } else {
-                sb.append(gridItemHtml(row.entry()));
+                sb.append("<div class=\"fe-vgrid-row\" style=\"display:grid;grid-template-columns:repeat(")
+                  .append(cols)
+                  .append("slots".equals(viewMode) ? ",44px);gap:0;\">" : ",1fr);gap:4px;\">");
+                for (VirtualFileSystem.Entry entry : row.items()) {
+                    sb.append(tiles ? tileItemHtml(entry) : gridItemHtml(entry));
+                }
+                sb.append("</div>");
             }
         }
-        sb.append("</div>");
         sb.append("</div>");
         content.setInnerHTML(sb.toString());
     }
@@ -5844,7 +6000,17 @@ public final class FileExplorerController {
         setStatus(t("informationera.fe.status_subfolder_found", files.size()));
     }
 
-    private List<VirtualFileSystem.Entry> topLevelEntries() {
+    private record ContentData(List<VirtualFileSystem.Entry> entries,
+                               List<ExplorerGrouping.Section> groups) {
+    }
+
+    /**
+     * 当前结果：先范围、搜索、筛选，再按当前列排序，随后视觉去重，最后才分组。
+     *
+     * <p>分组只重排已经可见的条目，不新增/复制条目；组序与组内排序分开计算，
+     * 因此点击数量表头不会把“待修理”组移到末尾。
+     */
+    private ContentData topLevelEntries() {
         // 筛选关闭时，隐藏的条件不参与显示：includeSubfolders 也不展开。
         boolean expand = filterOpen && filterSelection.includeSubfolders;
         List<VirtualFileSystem.Entry> entries = filterScopeEntries(expand);
@@ -5856,31 +6022,24 @@ public final class FileExplorerController {
             // 有任意条件时只保留满足条件的物品；文件夹没有标签/模组/创造标签页/关键词，自然被排除。
             entries.removeIf(entry -> entry.folder || !matchesFilter(entry));
         }
-        // 有分组时先确定组顺序，再让每组复用当前列排序（包括第三方列），
-        // 不能再用名称排序覆盖表头的排序选择。
-        if (groupBy != null && !groupBy.isEmpty()) {
-            java.util.Map<String, List<VirtualFileSystem.Entry>> groups = new java.util.LinkedHashMap<>();
-            for (VirtualFileSystem.Entry entry : entries) {
-                groups.computeIfAbsent(groupLabel(entry), key -> new ArrayList<>()).add(entry);
-            }
-            List<String> labels = new ArrayList<>(groups.keySet());
-            labels.sort(String.CASE_INSENSITIVE_ORDER);
-            entries.clear();
-            for (String label : labels) {
-                List<VirtualFileSystem.Entry> group = groups.get(label);
-                sortEntries(group);
-                entries.addAll(group);
-            }
-        } else {
-            sortEntries(entries);
-        }
+        sortEntries(entries);
         if (filterOpen && filterSelection.dedupe) {
-            // 仅视觉去重：在搜索/筛选/排序之后按真实 ItemKey 保留一个代表。
+            // 仅视觉去重：在搜索/筛选/排序之后按真实 ItemKey 保留一个代表，再分组。
             ExplorerItemDedupe.retainFirstByItemKey(entries,
                     entry -> entry.folder || entry.itemKey == null,
                     entry -> entry.itemKey);
         }
-        return entries;
+        if (!groupingActive()) {
+            return new ContentData(entries, List.of());
+        }
+        List<ExplorerGrouping.Section> groups =
+                ExplorerGrouping.sections(groupBy, entries, this::contextFor);
+        ExplorerGrouping.sortSections(groups, groupReverse);
+        entries.clear();
+        for (ExplorerGrouping.Section group : groups) {
+            entries.addAll(group.entries);
+        }
+        return new ContentData(entries, groups);
     }
 
     private boolean matchesFilter(VirtualFileSystem.Entry entry) {
@@ -5955,88 +6114,6 @@ public final class FileExplorerController {
         return entry.name;
     }
 
-    private String groupLabel(VirtualFileSystem.Entry entry) {
-        return switch (groupBy == null ? "" : groupBy) {
-            case "name" -> entry.name.isEmpty() ? "" : String.valueOf(firstLetter(entry.name.charAt(0)));
-            case "modified" -> modifiedGroup(entry.modified);
-            case "created" -> modifiedGroup(entry.created);
-            case "type" -> entry.type;
-            case "author" -> entry.author == null ? t("informationera.fe.unknown") : entry.author;
-            case "size" -> entry.folder ? t("informationera.fe.folder") : sizeGroup(entry.size);
-            default -> "";
-        };
-    }
-
-    /** 名称分组的首字母：中文按 GB2312 区位推拼音首字母，其它字符取大写首字母。 */
-    private static char firstLetter(char ch) {
-        if (ch >= 0x4e00 && ch <= 0x9fa5) {
-            try {
-                byte[] gbk = String.valueOf(ch).getBytes("GBK");
-                if (gbk.length == 2) {
-                    int code = ((gbk[0] & 0xff) << 8) | (gbk[1] & 0xff);
-                    if (code >= 0xB0A1 && code < 0xB0C5) return 'A';
-                    if (code < 0xB2C1) return 'B';
-                    if (code < 0xB4EE) return 'C';
-                    if (code < 0xB6EA) return 'D';
-                    if (code < 0xB7A2) return 'E';
-                    if (code < 0xB8C1) return 'F';
-                    if (code < 0xB9FE) return 'G';
-                    if (code < 0xBBF7) return 'H';
-                    if (code < 0xBFA6) return 'J';
-                    if (code < 0xC0AC) return 'K';
-                    if (code < 0xC2E8) return 'L';
-                    if (code < 0xC4C3) return 'M';
-                    if (code < 0xC5B6) return 'N';
-                    if (code < 0xC5BE) return 'O';
-                    if (code < 0xC6DA) return 'P';
-                    if (code < 0xC8BB) return 'Q';
-                    if (code < 0xC8F6) return 'R';
-                    if (code < 0xCBFA) return 'S';
-                    if (code < 0xCDDA) return 'T';
-                    if (code < 0xCEF4) return 'W';
-                    if (code < 0xD1B9) return 'X';
-                    if (code < 0xD4D1) return 'Y';
-                    if (code < 0xD7FA) return 'Z';
-                }
-            } catch (Exception ignored) {
-            }
-            return ch;
-        }
-        return Character.toUpperCase(ch);
-    }
-
-    /** 修改日期按「yyyy年M月」分桶。 */
-    private static String modifiedGroup(String modified) {
-        if (modified == null) {
-            return t("informationera.fe.unknown");
-        }
-        int firstSlash = modified.indexOf('/');
-        int secondSlash = modified.indexOf('/', firstSlash + 1);
-        if (firstSlash < 0 || secondSlash < 0) {
-            return modified;
-        }
-        try {
-            int y = Integer.parseInt(modified.substring(0, firstSlash).trim());
-            int m = Integer.parseInt(modified.substring(firstSlash + 1, secondSlash).trim());
-            return t("informationera.fe.year_month", y, m);
-        } catch (NumberFormatException e) {
-            return modified;
-        }
-    }
-
-    private static String sizeGroup(long size) {
-        if (size < 1024L) {
-            return t("informationera.fe.size_small");
-        }
-        if (size < 1024L * 1024L) {
-            return t("informationera.fe.size_medium");
-        }
-        if (size < 1024L * 1024L * 1024L) {
-            return t("informationera.fe.size_large");
-        }
-        return t("informationera.fe.size_huge");
-    }
-
     private void sortEntries(List<VirtualFileSystem.Entry> entries) {
         ExplorerColumn sortColumn = ExplorerColumnService.column(sortField);
         if (sortColumn == null) {
@@ -6065,7 +6142,9 @@ public final class FileExplorerController {
 
     /** 条目的公开列上下文；物品栈延迟构造。 */
     private ExplorerColumnContext contextFor(VirtualFileSystem.Entry entry) {
-        return ExplorerColumnService.context(entry, displayName(entry), () -> stackForEntry(entry));
+        String parentId = entry.parentFolderKey != null ? entry.parentFolderKey : currentKey;
+        return ExplorerColumnService.context(entry, displayName(entry), parentId, pathText(parentId),
+                () -> stackForEntry(entry));
     }
 
     private String buildTable(List<VirtualFileSystem.Entry> entries) {
@@ -6074,18 +6153,14 @@ public final class FileExplorerController {
         sb.append("<thead><tr style=\"").append(gridTemplateStyle()).append("\">");
         appendHeaderCells(sb);
         sb.append("</tr></thead><tbody>");
-        if (groupBy != null && !groupBy.isEmpty()) {
-            String currentGroup = null;
-            boolean currentCollapsed = false;
-            for (VirtualFileSystem.Entry entry : entries) {
-                String label = groupLabel(entry);
-                if (!label.equals(currentGroup)) {
-                    currentGroup = label;
-                    currentCollapsed = collapsedGroups.contains(label);
-                    sb.append(groupHeaderHtml(label, currentCollapsed));
-                }
-                if (!currentCollapsed) {
-                    renderTableRow(sb, entry);
+        if (!renderedGroups.isEmpty()) {
+            for (ExplorerGrouping.Section section : renderedGroups) {
+                boolean collapsed = collapsedGroups.contains(section.key());
+                sb.append(groupHeaderHtml(section, collapsed));
+                if (!collapsed) {
+                    for (VirtualFileSystem.Entry entry : section.entries) {
+                        renderTableRow(sb, entry);
+                    }
                 }
             }
         } else {
@@ -6098,23 +6173,28 @@ public final class FileExplorerController {
     }
 
     /** 分组头（表格行形式，供 details / content 视图使用）。 */
-    private String groupHeaderHtml(String label, boolean collapsed) {
+    private String groupHeaderHtml(ExplorerGrouping.Section section, boolean collapsed) {
         int visibleColumns = visibleColumns().size();
         // 表格行必须用 colspan 跨过所有可见列：td 改成 table-cell 后不再像原来的
         // flex 单元格那样撑满整行，行高也才由这个单元格决定，避免与第一条目重叠。
-        return "<tr class=\"fe-group-row\" data-group=\"" + escape(label)
+        return "<tr class=\"fe-group-row\" data-group-basis=\"" + escape(section.basisId)
+                + "\" data-group-bucket=\"" + escape(section.bucketId)
                 + "\"><td class=\"fe-group-header\" colspan=\"" + Math.max(1, visibleColumns) + "\">"
-                + "<span class=\"fe-group-toggle\">" + (collapsed ? "▸" : "▾") + "</span>"
-                + "<span class=\"fe-group-title\">" + escape(label) + "</span>"
-                + "</td></tr>";
+                + groupHeaderInner(section, collapsed) + "</td></tr>";
     }
 
     /** 分组头（div 形式，供列表/内容/平铺/图标视图使用）。 */
-    private String groupHeaderDiv(String label, boolean collapsed) {
-        return "<div class=\"fe-group-div\" data-group=\"" + escape(label) + "\">"
-                + "<span class=\"fe-group-toggle\">" + (collapsed ? "▸" : "▾") + "</span>"
-                + "<span class=\"fe-group-title\">" + escape(label) + "</span>"
-                + "</div>";
+    private String groupHeaderDiv(ExplorerGrouping.Section section, boolean collapsed) {
+        return "<div class=\"fe-group-div\" data-group-basis=\"" + escape(section.basisId)
+                + "\" data-group-bucket=\"" + escape(section.bucketId) + "\">"
+                + groupHeaderInner(section, collapsed) + "</div>";
+    }
+
+    private String groupHeaderInner(ExplorerGrouping.Section section, boolean collapsed) {
+        return "<span class=\"fe-group-toggle\">" + (collapsed ? "▸" : "▾") + "</span>"
+                + "<span class=\"fe-group-title\">" + escape(section.label) + "</span>"
+                + "<span class=\"fe-group-count\">"
+                + escape(t("informationera.fe.group_count", Integer.toString(section.count()))) + "</span>";
     }
 
     private String headerCell(ExplorerColumn column) {
@@ -6141,20 +6221,23 @@ public final class FileExplorerController {
                 }
             });
         }
-        for (Element groupRow : document.querySelectorAll(".fe-group-row[data-group], .fe-group-div[data-group]")) {
-            String group = groupRow.getAttribute("data-group");
+        for (Element groupRow : document.querySelectorAll(
+                ".fe-group-row[data-group-basis][data-group-bucket], .fe-group-div[data-group-basis][data-group-bucket]")) {
+            String basis = groupRow.getAttribute("data-group-basis");
+            String bucket = groupRow.getAttribute("data-group-bucket");
+            if (basis == null || bucket == null) {
+                continue;
+            }
+            String key = ExplorerGrouping.key(basis, bucket);
             Element toggle = groupRow.querySelector(".fe-group-toggle");
             Element title = groupRow.querySelector(".fe-group-title");
             if (toggle != null) {
                 toggle.addEventListener("click", e -> {
                     e.stopPropagation();
-                    if (group == null) {
-                        return;
-                    }
-                    if (collapsedGroups.contains(group)) {
-                        collapsedGroups.remove(group);
+                    if (collapsedGroups.contains(key)) {
+                        collapsedGroups.remove(key);
                     } else {
-                        collapsedGroups.add(group);
+                        collapsedGroups.add(key);
                     }
                     renderContent();
                 });
@@ -6162,9 +6245,7 @@ public final class FileExplorerController {
             if (title != null) {
                 title.addEventListener("click", e -> {
                     e.stopPropagation();
-                    if (group != null) {
-                        selectGroup(group);
-                    }
+                    selectGroup(key);
                 });
             }
         }
@@ -6343,6 +6424,15 @@ public final class FileExplorerController {
         entries.add(CtxEntry.separator());
         entries.add(CtxEntry.action(t("informationera.fe.show_all_columns"), this::showAllColumns));
         entries.add(CtxEntry.action(t("informationera.fe.reset_widths"), this::resetColumnWidths));
+        String headerGroupId = ExplorerColumnService.headerGroupId(target);
+        ExplorerGroup headerGroup = ExplorerColumnService.group(headerGroupId);
+        if (headerGroup != null) {
+            entries.add(CtxEntry.separator());
+            boolean active = headerGroupId.equals(groupBy);
+            entries.add(CtxEntry.action(
+                    active ? t("informationera.fe.cancel_group_by") : t("informationera.fe.group_by_column"),
+                    () -> setGroupBy(active ? null : headerGroupId)));
+        }
         openContextMenu(x, y, entries);
     }
 
@@ -6421,6 +6511,178 @@ public final class FileExplorerController {
     }
 
     /** 打开原生样式的列选择对话框；草稿在确定前不影响当前视图。 */
+    // ---------- 分组依据弹窗 ----------
+
+    private void showGroupDialog() {
+        Element dialog = document.getElementById("fe-group-dialog");
+        Element overlay = document.getElementById("fe-group-overlay");
+        if (dialog == null || overlay == null) {
+            return;
+        }
+        groupDialogOpen = true;
+        groupDialogTyped = "";
+        setText("fe-group-title", t("informationera.fe.group_dialog_title"));
+        Element search = document.getElementById("fe-group-search");
+        if (search != null) {
+            search.setValue("");
+            search.setPlaceholder(t("informationera.fe.group_search_placeholder"));
+        }
+        setText("fe-group-expand", t("informationera.fe.group_expand_all"));
+        setText("fe-group-collapse", t("informationera.fe.group_collapse_all"));
+        setText("fe-group-close-button", t("informationera.fe.close"));
+        updateGroupReverseButton();
+        renderGroupDialog();
+        Size viewport = document.getViewportSize();
+        double width = 620;
+        double height = Math.min(560, Math.max(200, viewport.height() - 180));
+        double left = Math.max(8, (viewport.width() - width) / 2);
+        double top = Math.max(8, (viewport.height() - height) / 2);
+        dialog.setInlineStyleProperty("left", px(left));
+        dialog.setInlineStyleProperty("top", px(top));
+        dialog.setInlineStyleProperty("height", px(height));
+        dialog.setInlineStyleProperty("display", "flex");
+        overlay.setInlineStyleProperty("display", "block");
+        if (search != null) {
+            search.focus();
+        }
+    }
+
+    private void closeGroupDialog() {
+        groupDialogOpen = false;
+        groupDialogTyped = "";
+        Element dialog = document.getElementById("fe-group-dialog");
+        if (dialog != null) {
+            dialog.setInlineStyleProperty("display", "none");
+        }
+        Element overlay = document.getElementById("fe-group-overlay");
+        if (overlay != null) {
+            overlay.setInlineStyleProperty("display", "none");
+        }
+    }
+
+    private void updateGroupReverseButton() {
+        Element reverse = document.getElementById("fe-group-reverse");
+        if (reverse == null) {
+            return;
+        }
+        reverse.setTextContent((groupReverse ? "✓ " : "") + t("informationera.fe.group_reverse"));
+        reverse.setAttribute("aria-pressed", groupReverse ? "true" : "false");
+        if (groupReverse) {
+            reverse.getClassList().add("active");
+        } else {
+            reverse.getClassList().remove("active");
+        }
+    }
+
+    private void renderGroupDialog() {
+        Element body = document.getElementById("fe-group-body");
+        if (body == null) {
+            return;
+        }
+        setText("fe-group-title", t("informationera.fe.group_dialog_title"));
+        setText("fe-group-expand", t("informationera.fe.group_expand_all"));
+        setText("fe-group-collapse", t("informationera.fe.group_collapse_all"));
+        setText("fe-group-close-button", t("informationera.fe.close"));
+        Element search = document.getElementById("fe-group-search");
+        if (search != null) {
+            search.setPlaceholder(t("informationera.fe.group_search_placeholder"));
+        }
+        updateGroupReverseButton();
+        double scrollTop = body.getScrollTop();
+        String query = groupDialogTyped == null ? "" : groupDialogTyped.trim().toLowerCase(Locale.ROOT);
+        StringBuilder sb = new StringBuilder();
+        sb.append("<button class=\"fe-group-option").append(groupBy == null ? " selected" : "")
+          .append("\" type=\"button\" data-group-none=\"1\">")
+          .append("<span class=\"fe-group-option-label\">").append(escape(t("informationera.fe.none")))
+          .append("</span><span class=\"fe-group-option-example\">")
+          .append(escape(t("informationera.fe.group_none_example")))
+          .append("</span><span class=\"fe-group-option-check\">")
+          .append(groupBy == null ? "✓" : "").append("</span></button>");
+        if (groupBy != null && ExplorerColumnService.group(groupBy) == null) {
+            sb.append("<div class=\"fe-group-empty\">")
+              .append(escape(t("informationera.fe.group_unavailable", groupBy))).append("</div>");
+        }
+        boolean any = false;
+        for (ExplorerGroup.Category category : ExplorerGroup.Category.values()) {
+            List<ExplorerGroup> groups = new ArrayList<>();
+            for (ExplorerGroup group : ExplorerColumnService.groups()) {
+                if (group.category() != category || !groupMatches(group, query)) {
+                    continue;
+                }
+                groups.add(group);
+            }
+            if (groups.isEmpty()) {
+                continue;
+            }
+            groups.sort(Comparator.comparing(group -> ExplorerColumnService.groupLabel(group).getString(),
+                    String.CASE_INSENSITIVE_ORDER));
+            any = true;
+            sb.append("<div class=\"fe-group-section-head\">")
+              .append(escape(t(category.translationKey()))).append("</div>");
+            for (ExplorerGroup group : groups) {
+                String label = ExplorerColumnService.groupLabel(group).getString();
+                String example = ExplorerColumnService.groupExample(group).getString();
+                if (example.isBlank()) {
+                    example = group.id();
+                }
+                boolean selected = group.id().equals(groupBy);
+                sb.append("<button class=\"fe-group-option").append(selected ? " selected" : "")
+                  .append("\" type=\"button\" data-group-option=\"").append(escape(group.id())).append("\">")
+                  .append("<span class=\"fe-group-option-label\">").append(escape(label))
+                  .append("</span><span class=\"fe-group-option-example\">").append(escape(example))
+                  .append("</span><span class=\"fe-group-option-check\">")
+                  .append(selected ? "✓" : "").append("</span></button>");
+            }
+        }
+        if (!any && !query.isEmpty()) {
+            sb.append("<div class=\"fe-group-empty\">")
+              .append(escape(t("informationera.fe.group_no_match"))).append("</div>");
+        }
+        body.setInnerHTML(sb.toString());
+        body.setScrollTop(scrollTop);
+        for (Element button : body.querySelectorAll(".fe-group-option[data-group-option]")) {
+            String id = button.getAttribute("data-group-option");
+            button.addEventListener("click", e -> {
+                e.stopPropagation();
+                setGroupBy(id);
+                closeGroupDialog();
+            });
+        }
+        Element none = body.querySelector("[data-group-none]");
+        if (none != null) {
+            none.addEventListener("click", e -> {
+                e.stopPropagation();
+                setGroupBy(null);
+                closeGroupDialog();
+            });
+        }
+    }
+
+    private boolean groupMatches(ExplorerGroup group, String query) {
+        if (query.isEmpty()) {
+            return true;
+        }
+        String label = ExplorerColumnService.groupLabel(group).getString();
+        String example = ExplorerColumnService.groupExample(group).getString();
+        return label.toLowerCase(Locale.ROOT).contains(query)
+                || example.toLowerCase(Locale.ROOT).contains(query)
+                || group.id().toLowerCase(Locale.ROOT).contains(query);
+    }
+
+    private void selectFirstGroupMatch() {
+        String query = groupDialogTyped == null ? "" : groupDialogTyped.trim().toLowerCase(Locale.ROOT);
+        if (query.isEmpty()) {
+            return;
+        }
+        for (ExplorerGroup group : ExplorerColumnService.groups()) {
+            if (groupMatches(group, query)) {
+                setGroupBy(group.id());
+                closeGroupDialog();
+                return;
+            }
+        }
+    }
+
     private void showColumnManager() {
         hideTooltip();
         closeContextMenu();
@@ -6769,19 +7031,14 @@ public final class FileExplorerController {
      */
     private void appendEntriesWithGroups(StringBuilder sb, String itemsClass, List<VirtualFileSystem.Entry> entries,
                                          java.util.function.Consumer<VirtualFileSystem.Entry> renderer) {
-        if (groupBy != null && !groupBy.isEmpty()) {
-            java.util.Map<String, List<VirtualFileSystem.Entry>> groups = new java.util.LinkedHashMap<>();
-            for (VirtualFileSystem.Entry entry : entries) {
-                groups.computeIfAbsent(groupLabel(entry), k -> new ArrayList<>()).add(entry);
-            }
-            for (var groupEntry : groups.entrySet()) {
-                String label = groupEntry.getKey();
-                boolean collapsed = collapsedGroups.contains(label);
+        if (!renderedGroups.isEmpty()) {
+            for (ExplorerGrouping.Section section : renderedGroups) {
+                boolean collapsed = collapsedGroups.contains(section.key());
                 sb.append("<div class=\"fe-group-section\">");
-                sb.append(groupHeaderDiv(label, collapsed));
+                sb.append(groupHeaderDiv(section, collapsed));
                 if (!collapsed) {
                     sb.append("<div class=\"").append(itemsClass).append("\">");
-                    for (VirtualFileSystem.Entry entry : groupEntry.getValue()) {
+                    for (VirtualFileSystem.Entry entry : section.entries) {
                         renderer.accept(entry);
                     }
                     sb.append("</div>");
@@ -6872,18 +7129,14 @@ public final class FileExplorerController {
         sb.append("<thead><tr style=\"").append(gridTemplateStyle()).append("\">");
         appendHeaderCells(sb);
         sb.append("</tr></thead><tbody>");
-        if (groupBy != null && !groupBy.isEmpty()) {
-            String currentGroup = null;
-            boolean currentCollapsed = false;
-            for (VirtualFileSystem.Entry entry : entries) {
-                String label = groupLabel(entry);
-                if (!label.equals(currentGroup)) {
-                    currentGroup = label;
-                    currentCollapsed = collapsedGroups.contains(label);
-                    sb.append(groupHeaderHtml(label, currentCollapsed));
-                }
-                if (!currentCollapsed) {
-                    renderTableRow(sb, entry);
+        if (!renderedGroups.isEmpty()) {
+            for (ExplorerGrouping.Section section : renderedGroups) {
+                boolean collapsed = collapsedGroups.contains(section.key());
+                sb.append(groupHeaderHtml(section, collapsed));
+                if (!collapsed) {
+                    for (VirtualFileSystem.Entry entry : section.entries) {
+                        renderTableRow(sb, entry);
+                    }
                 }
             }
         } else {
@@ -7268,12 +7521,17 @@ public final class FileExplorerController {
         filterLanguageVersion = version;
         filterCandidateLanguageVersion = version;
         filterCandidateCache.clear();
-        if (!filterOpen || document == null) {
+        if (document == null) {
             return;
         }
-        renderFilterPane();
-        if (filterDialogOpen) {
-            renderFilterDialog();
+        if (filterOpen) {
+            renderFilterPane();
+            if (filterDialogOpen) {
+                renderFilterDialog();
+            }
+        }
+        if (groupDialogOpen) {
+            renderGroupDialog();
         }
         renderContent();
     }

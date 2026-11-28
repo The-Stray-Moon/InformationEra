@@ -17,7 +17,8 @@ import java.util.Set;
  * 因此新增/删除模组、改变注册顺序都不会让旧宽度或显隐串到别的列。未注册但曾经保存过的 ID 会
  * 原样保留在状态里，模组重新出现时可以恢复原设置。
  *
- * <p>旧版固定列格式（7/8 字段，无命名空间 ID）仍可解码；新格式带 {@code v2|} 前缀。
+ * <p>旧版固定列格式（7/8 字段，无命名空间 ID）和 {@code v2|} 格式仍可解码；新格式带 {@code v3|} 前缀，
+ * 增加组序方向。旧分组短名（{@code name}/{@code type}/…）在归一化时迁移为稳定依据 ID。
  */
 public final class ExplorerViewState {
 
@@ -49,19 +50,52 @@ public final class ExplorerViewState {
     public static final List<String> BUILT_IN_COLUMN_ORDER =
             List.of(BUILT_IN_COLUMN_IDS.clone());
 
+    /** 内置分组依据的稳定 ID；完整列表供可搜索的「更多分组依据」弹窗使用。 */
+    public static final String GROUP_NAME = "informationera:name";
+    public static final String GROUP_MODIFIED = "informationera:modified";
+    public static final String GROUP_CREATED = "informationera:created";
+    public static final String GROUP_TYPE = "informationera:type";
+    public static final String GROUP_SIZE = "informationera:size";
+    public static final String GROUP_AUTHOR = "informationera:author";
+    public static final String GROUP_SOURCE_MOD = "informationera:source_mod";
+    public static final String GROUP_RARITY = "informationera:rarity";
+    public static final String GROUP_DURABILITY = "informationera:durability_state";
+    public static final String GROUP_MAX_STACK = "informationera:max_stack";
+    public static final String GROUP_ENCHANTMENT = "informationera:enchantment";
+    public static final String GROUP_PARENT_FOLDER = "informationera:parent_folder";
+
+    public static final List<String> BUILT_IN_GROUP_IDS = List.of(
+            GROUP_NAME, GROUP_MODIFIED, GROUP_CREATED, GROUP_TYPE, GROUP_SIZE, GROUP_AUTHOR,
+            GROUP_SOURCE_MOD, GROUP_RARITY, GROUP_DURABILITY, GROUP_MAX_STACK,
+            GROUP_ENCHANTMENT, GROUP_PARENT_FOLDER);
+
+    /** 一级分组菜单只列旧版六个常用依据；其余进入可搜索的「更多分组依据」。 */
+    public static final List<String> COMMON_GROUP_IDS = List.of(
+            GROUP_NAME, GROUP_MODIFIED, GROUP_CREATED, GROUP_TYPE, GROUP_SIZE, GROUP_AUTHOR);
+
+    /** 旧版分组字段名；只用于迁移到稳定 ID。 */
+    private static final String[] LEGACY_GROUP_FIELDS = {
+            "name", "modified", "created", "type", "size", "author"
+    };
+
+    private static final String[] LEGACY_GROUP_IDS = {
+            GROUP_NAME, GROUP_MODIFIED, GROUP_CREATED, GROUP_TYPE, GROUP_SIZE, GROUP_AUTHOR
+    };
+
     public static final String NAME_COLUMN_ID = BUILT_IN_COLUMN_IDS[0];
+    public static final String NAMESPACE_COLUMN_ID = BUILT_IN_COLUMN_IDS[7];
+    public static final String DURABILITY_COLUMN_ID = BUILT_IN_COLUMN_IDS[9];
 
     public static final String BUILT_IN_VIEW_MODE = "details";
     public static final String BUILT_IN_SORT_FIELD = BUILT_IN_COLUMN_IDS[0];
 
     private static final List<String> VIEW_MODES =
             List.of("details", "content", "list", "tiles", "slots", "small", "medium", "large", "xlarge");
-    private static final List<String> GROUP_FIELDS =
-            List.of("name", "modified", "created", "type", "size", "author");
     private static final double MIN_COLUMN_WIDTH = 48.0;
     private static final double MAX_COLUMN_WIDTH = 4000.0;
     private static final char FIELD_SEP = '|';
     private static final String V2_PREFIX = "v2";
+    private static final String V3_PREFIX = "v3";
 
     /** 一列的持久化设置。 */
     public static final class ColumnSetting {
@@ -82,7 +116,10 @@ public final class ExplorerViewState {
     public String sortField;
     public boolean sortAsc;
     public boolean foldersFirst;
+    /** 分组依据的稳定 ID；未注册的第三方依据也原样保留。 */
     public String groupBy;
+    /** 只反向组序，不改变组内条目排序。 */
+    public boolean groupReverse;
     /** ID -> 宽度/显隐。可以包含当前未注册的第三方列。 */
     public final Map<String, ColumnSetting> columnSettings = new LinkedHashMap<>();
     /** 持久化列序；可以包含当前未注册的第三方列 ID。 */
@@ -94,6 +131,7 @@ public final class ExplorerViewState {
         sortAsc = true;
         foldersFirst = true;
         groupBy = null;
+        groupReverse = false;
         ensureBuiltIns();
     }
 
@@ -108,6 +146,7 @@ public final class ExplorerViewState {
         copy.sortAsc = sortAsc;
         copy.foldersFirst = foldersFirst;
         copy.groupBy = groupBy;
+        copy.groupReverse = groupReverse;
         copy.columnSettings.clear();
         for (Map.Entry<String, ColumnSetting> entry : columnSettings.entrySet()) {
             copy.columnSettings.put(entry.getKey(), entry.getValue().copy());
@@ -187,9 +226,7 @@ public final class ExplorerViewState {
             viewMode = BUILT_IN_VIEW_MODE;
         }
         sortField = normalizeSortField(sortField);
-        if (groupBy != null && (groupBy.isBlank() || !GROUP_FIELDS.contains(groupBy))) {
-            groupBy = null;
-        }
+        groupBy = normalizeGroupBasis(groupBy);
         ensureBuiltIns();
         for (ColumnSetting setting : columnSettings.values()) {
             setting.width = clampWidth(setting.width);
@@ -246,6 +283,28 @@ public final class ExplorerViewState {
         return isValidColumnId(field) ? field : BUILT_IN_SORT_FIELD;
     }
 
+    /**
+     * 归一化分组依据：旧短名迁移到稳定 ID；未注册但有命名空间的第三方 ID 原样保留。
+     *
+     * <p>保留未知 ID 是为了模组临时卸载后重新装回仍能恢复分组，真正是否生效由
+     * {@code ExplorerColumnService.group(id)} 决定；不可用时按未分组显示，但配置不丢。
+     */
+    public static String normalizeGroupBasis(String group) {
+        if (group == null) {
+            return null;
+        }
+        String value = group.trim();
+        if (value.isEmpty()) {
+            return null;
+        }
+        for (int i = 0; i < LEGACY_GROUP_FIELDS.length; i++) {
+            if (LEGACY_GROUP_FIELDS[i].equals(value)) {
+                return LEGACY_GROUP_IDS[i];
+            }
+        }
+        return isValidColumnId(value) ? value : null;
+    }
+
     /** 旧字段名转稳定 ID；未知返回 null。 */
     public static String legacyColumnId(String field) {
         if (field == null) {
@@ -280,16 +339,17 @@ public final class ExplorerViewState {
         return true;
     }
 
-    /** 序列化。新格式：v2|view|sort|asc|folders|group|orderIds|settings。 */
+    /** 序列化。新格式：v3|view|sort|asc|folders|group|groupReverse|orderIds|settings。 */
     public String encode() {
         normalize();
         StringBuilder sb = new StringBuilder(160);
-        sb.append(V2_PREFIX).append(FIELD_SEP)
+        sb.append(V3_PREFIX).append(FIELD_SEP)
           .append(viewMode).append(FIELD_SEP)
           .append(sortField).append(FIELD_SEP)
           .append(sortAsc ? '1' : '0').append(FIELD_SEP)
           .append(foldersFirst ? '1' : '0').append(FIELD_SEP)
-          .append(groupBy == null ? "" : groupBy).append(FIELD_SEP);
+          .append(groupBy == null ? "" : groupBy).append(FIELD_SEP)
+          .append(groupReverse ? '1' : '0').append(FIELD_SEP);
         for (int i = 0; i < columnOrder.size(); i++) {
             if (i > 0) {
                 sb.append(',');
@@ -324,10 +384,55 @@ public final class ExplorerViewState {
             return defaults();
         }
         String[] parts = raw.split("\\" + FIELD_SEP, -1);
-        if (parts.length > 0 && V2_PREFIX.equals(parts[0].trim())) {
-            return decodeV2(parts);
+        if (parts.length > 0) {
+            String prefix = parts[0].trim();
+            if (V3_PREFIX.equals(prefix)) {
+                return decodeV3(parts);
+            }
+            if (V2_PREFIX.equals(prefix)) {
+                return decodeV2(parts);
+            }
         }
         return decodeLegacy(parts);
+    }
+
+    private static ExplorerViewState decodeV3(String[] parts) {
+        if (parts.length < 9) {
+            return defaults();
+        }
+        ExplorerViewState state = new ExplorerViewState();
+        state.viewMode = parts[1].trim();
+        state.sortField = parts[2].trim();
+        state.sortAsc = !"0".equals(parts[3].trim());
+        state.foldersFirst = !"0".equals(parts[4].trim());
+        String group = parts[5].trim();
+        state.groupBy = group.isEmpty() ? null : group;
+        state.groupReverse = "1".equals(parts[6].trim());
+        state.columnSettings.clear();
+        if (!parts[8].isBlank()) {
+            for (String entry : parts[8].split(";")) {
+                String[] fields = entry.split(",", 3);
+                if (fields.length < 3 || !isValidColumnId(fields[0].trim())) {
+                    continue;
+                }
+                try {
+                    state.columnSettings.put(fields[0].trim(), new ColumnSetting(
+                            Double.parseDouble(fields[1].trim()), "1".equals(fields[2].trim())));
+                } catch (NumberFormatException ignored) {
+                    state.columnSettings.put(fields[0].trim(), new ColumnSetting(120.0, false));
+                }
+            }
+        }
+        state.columnOrder.clear();
+        if (!parts[7].isBlank()) {
+            for (String id : parts[7].split(",")) {
+                if (isValidColumnId(id.trim())) {
+                    state.columnOrder.add(id.trim());
+                }
+            }
+        }
+        state.normalize();
+        return state;
     }
 
     private static ExplorerViewState decodeV2(String[] parts) {
@@ -421,6 +526,7 @@ public final class ExplorerViewState {
             return false;
         }
         if (sortAsc != state.sortAsc || foldersFirst != state.foldersFirst
+                || groupReverse != state.groupReverse
                 || !Objects.equals(viewMode, state.viewMode)
                 || !Objects.equals(sortField, state.sortField)
                 || !Objects.equals(groupBy, state.groupBy)
@@ -441,7 +547,7 @@ public final class ExplorerViewState {
 
     @Override
     public int hashCode() {
-        int result = Objects.hash(viewMode, sortField, sortAsc, foldersFirst, groupBy, columnOrder);
+        int result = Objects.hash(viewMode, sortField, sortAsc, foldersFirst, groupBy, groupReverse, columnOrder);
         int settingsHash = 0;
         for (Map.Entry<String, ColumnSetting> entry : columnSettings.entrySet()) {
             settingsHash += Objects.hash(entry.getKey(), entry.getValue().width, entry.getValue().visible);

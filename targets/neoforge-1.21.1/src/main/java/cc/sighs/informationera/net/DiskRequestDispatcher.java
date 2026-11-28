@@ -408,9 +408,15 @@ public final class DiskRequestDispatcher {
     // ---------------------------------------------------------------- 工具
 
     private static void reply(ServerPlayer player, PlayerDisk disk, PlayerDiskStore store, OpResult result) {
-        String payload = disk == null ? "" : DiskCodec.encode(disk);
+        String payload = disk == null ? "" : DiskPayload.encode(DiskCodec.encode(disk));
         // 设备插槽每次一并回推：客户端靠它渲染开始菜单、并决定资源管理器按钮是否出现。
         String device = store == null ? "" : store.deviceOf(player.getUUID()).encode(player.registryAccess());
+        if (payload == null) {
+            // 超过网络字符串预算时绝不发送半截/违规快照；空 payload 让客户端保留上一份镜像。
+            NetworkManager.sendToPlayer(DiskStatePacket.of("", device, false,
+                    "informationera.msg.disk_state_too_large", ""), player);
+            return;
+        }
         NetworkManager.sendToPlayer(DiskStatePacket.of(payload, device, result.isOk(),
                 result.messageKey(), result.arg()), player);
     }

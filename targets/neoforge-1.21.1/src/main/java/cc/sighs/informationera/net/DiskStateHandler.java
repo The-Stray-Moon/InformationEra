@@ -26,7 +26,19 @@ public final class DiskStateHandler {
         // 网络回调不保证在客户端线程上，碰 UI 前先切回客户端线程。
         Minecraft.getInstance().execute(() -> {
             device = DeviceSlots.decode(packet.device(), DiskClient.registryProvider());
-            PlayerDisk decoded = DiskCodec.decode(packet.payload());
+            String payload = DiskPayload.decode(packet.payload());
+            if (payload == null) {
+                // 损坏、截断或超限的快照不能覆盖上一份有效镜像，也不能让界面误以为已更新。
+                DiskClient.onStateUpdated(mirror, false,
+                        "informationera.msg.disk_state_invalid", "");
+                return;
+            }
+            PlayerDisk decoded = DiskCodec.decode(payload);
+            if (decoded == null && !payload.isEmpty()) {
+                DiskClient.onStateUpdated(mirror, false,
+                        "informationera.msg.disk_state_invalid", "");
+                return;
+            }
             if (decoded != null) {
                 mirror = decoded;
             } else if (device.card().isEmpty()) {

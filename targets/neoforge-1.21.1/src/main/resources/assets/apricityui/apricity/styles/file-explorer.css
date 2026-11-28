@@ -823,14 +823,16 @@
 }
 
 .fe-group-toggle {
-    flex: 0 0 16px;
-    width: 16px;
-    height: 16px;
+    /* 分组头整体经过 AUI 缩放后只有几个 GUI 像素；扩大箭头的可点击区域，
+       避免点击落在标题上而只选中、不折叠。 */
+    flex: 0 0 24px;
+    width: 24px;
+    height: 20px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
     vertical-align: middle;
-    margin-right: 6px;
+    margin-right: 4px;
     cursor: pointer;
 }
 
@@ -841,6 +843,11 @@
 
 .fe-group-title:hover {
     color: var(--ore-gold);
+}
+
+.fe-group-count {
+    color: var(--ore-ink-muted);
+    font-size: var(--ore-font-sm);
 }
 
 /* 非表格视图的分组：每个分组是独立 section，组内条目各自重新排布。 */
@@ -1454,6 +1461,8 @@
     top: 0;
     display: none;
     min-width: 160px;
+    max-height: calc(100vh - 16px);
+    overflow-y: auto;
     padding: 4px;
     color: var(--ore-ink);
     background: var(--ore-surface-deep);
@@ -2555,6 +2564,169 @@
 .fe-filter-suggestion:hover {
     color: #ffffff;
     background: var(--ore-green);
+}
+
+/* ---------- 分组依据弹窗（排序 → 更多分组依据…） ---------- */
+.fe-group-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    z-index: 750;
+    transform: translateZ(300px);
+    display: none;
+    pointer-events: auto;
+    background: rgba(0, 0, 0, 0.35);
+}
+
+.fe-group-dialog {
+    position: absolute;
+    z-index: 760;
+    transform: translateZ(300px);
+    display: none;
+    width: 620px;
+    max-width: calc(100vw - 24px);
+    max-height: calc(100vh - 16px);
+    color: var(--ore-ink);
+    background: var(--ore-surface-deep);
+    border: 3px solid var(--ore-edge);
+    box-shadow: 6px 6px 0 rgba(0, 0, 0, 0.35);
+    pointer-events: auto;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.fe-group-titlebar {
+    display: flex;
+    align-items: center;
+    height: 32px;
+    flex: 0 0 32px;
+    padding: 0 6px 0 12px;
+    background: var(--ore-surface);
+    border-bottom: 2px solid var(--ore-edge);
+}
+
+.fe-group-title {
+    flex: 1 1 auto;
+    color: #ffffff;
+    font-size: var(--ore-font-md);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.fe-group-close {
+    flex: 0 0 26px;
+    width: 26px;
+    height: 26px;
+    border: 0;
+    color: #ffffff;
+    background: transparent;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.fe-group-close:hover {
+    background: var(--ore-red);
+}
+
+.fe-group-close svg {
+    width: 12px;
+    height: 12px;
+}
+
+.fe-group-search {
+    flex: 0 0 auto;
+    margin: 8px 12px 4px;
+    width: calc(100% - 24px);
+}
+
+.fe-group-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 4px 12px 8px;
+}
+
+.fe-group-section-head {
+    padding: 8px 2px 4px;
+    color: var(--ore-ink-muted);
+    font-size: var(--ore-font-sm);
+    border-bottom: 2px solid var(--ore-edge);
+    position: sticky;
+    top: 0;
+    background: var(--ore-surface-deep);
+}
+
+.fe-group-option {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) 22px;
+    gap: 8px;
+    align-items: center;
+    width: 100%;
+    min-height: 32px;
+    padding: 4px 2px;
+    border: 0;
+    border-bottom: 1px solid var(--ore-edge);
+    color: var(--ore-ink);
+    background: transparent;
+    text-align: left;
+    cursor: pointer;
+}
+
+.fe-group-option:hover {
+    background: var(--ore-surface);
+}
+
+.fe-group-option.selected {
+    color: var(--ore-gold);
+}
+
+.fe-group-option-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.fe-group-option-example {
+    min-width: 0;
+    color: var(--ore-ink-muted);
+    font-size: var(--ore-font-sm);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.fe-group-option-check {
+    text-align: center;
+    color: var(--ore-gold);
+}
+
+.fe-group-empty {
+    padding: 12px 2px;
+    color: var(--ore-ink-muted);
+}
+
+.fe-group-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 0 0 auto;
+    padding: 8px 12px;
+    border-top: 2px solid var(--ore-edge);
+    background: var(--ore-surface);
+}
+
+.fe-group-actions-spacer {
+    flex: 1 1 auto;
+}
+
+.fe-group-action.active {
+    color: var(--ore-gold);
 }
 
 /* ---------- 筛选条件弹窗 ---------- */

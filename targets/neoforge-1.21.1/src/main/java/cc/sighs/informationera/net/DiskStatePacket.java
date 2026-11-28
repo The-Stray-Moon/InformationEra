@@ -8,7 +8,8 @@ import com.sighs.apricityui.network.api.Side;
 /**
  * 服务端 → 客户端：磁盘的权威状态。
  *
- * <p>{@code payload} 是 {@code DiskCodec} 编码后的行式文本，客户端解码成只读镜像；
+ * <p>{@code payload} 是 {@code DiskCodec} 编码后的行式文本（大磁盘经 {@link DiskPayload}
+ * 压缩），客户端解码成只读镜像；
  * {@code device} 是 {@code DeviceSlots} 编码后的插槽内容（插卡区的卡 + 功能模块），
  * 客户端据此渲染开始菜单、并决定「资源管理器按钮要不要出现」。
  *

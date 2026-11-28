@@ -83,7 +83,7 @@ public class ExplorerViewStoreTest {
 
         ExplorerViewState diskB = store.view(PLAYER_A, DISK_B, SHARED_PRESET);
         diskB.viewMode = "medium";
-        diskB.groupBy = "type";
+        diskB.groupBy = ExplorerViewState.GROUP_TYPE;
         store.setView(PLAYER_A, DISK_B, SHARED_PRESET, diskB);
 
         ExplorerViewState a = store.view(PLAYER_A, DISK_A, SHARED_PRESET);
@@ -93,7 +93,7 @@ public class ExplorerViewStoreTest {
         assertEquals(410.0, a.width(NAME, 0));
         assertNull(a.groupBy);
         assertEquals("medium", b.viewMode);
-        assertEquals("type", b.groupBy);
+        assertEquals(ExplorerViewState.GROUP_TYPE, b.groupBy);
         assertEquals(ExplorerViewState.BUILT_IN_COLUMN_WIDTHS[0], b.width(NAME, 0));
     }
 
@@ -107,13 +107,13 @@ public class ExplorerViewStoreTest {
 
         ExplorerViewState template = store.defaultView(PLAYER_A);
         template.viewMode = "tiles";
-        template.groupBy = "type";
+        template.groupBy = ExplorerViewState.GROUP_TYPE;
         store.setDefaultView(PLAYER_A, template);
 
         assertTrue(store.display(PLAYER_A).showPreview);
         assertTrue(store.display(PLAYER_A).compact);
         assertEquals("tiles", store.view(PLAYER_A, DISK_B, FOLDER_B).viewMode);
-        assertEquals("type", store.view(PLAYER_A, DISK_B, FOLDER_B).groupBy);
+        assertEquals(ExplorerViewState.GROUP_TYPE, store.view(PLAYER_A, DISK_B, FOLDER_B).groupBy);
         assertFalse(store.display(PLAYER_B).showPreview);
         assertEquals("details", store.view(PLAYER_B, DISK_B, FOLDER_B).viewMode);
     }
@@ -127,13 +127,13 @@ public class ExplorerViewStoreTest {
 
         ExplorerViewState template = store.defaultView(PLAYER_A);
         template.viewMode = "tiles";
-        template.groupBy = "type";
+        template.groupBy = ExplorerViewState.GROUP_TYPE;
         store.setDefaultView(PLAYER_A, template);
 
         assertEquals("list", store.view(PLAYER_A, DISK_A, FOLDER_A).viewMode);
         assertNull(store.view(PLAYER_A, DISK_A, FOLDER_A).groupBy);
         assertEquals("tiles", store.view(PLAYER_A, DISK_A, FOLDER_B).viewMode);
-        assertEquals("type", store.view(PLAYER_A, DISK_A, FOLDER_B).groupBy);
+        assertEquals(ExplorerViewState.GROUP_TYPE, store.view(PLAYER_A, DISK_A, FOLDER_B).groupBy);
     }
 
     @Test
@@ -283,7 +283,7 @@ public class ExplorerViewStoreTest {
 
         ExplorerViewState template = store.defaultView(PLAYER_A);
         template.viewMode = "tiles";
-        template.groupBy = "size";
+        template.groupBy = ExplorerViewState.GROUP_SIZE;
         store.setDefaultView(PLAYER_A, template);
 
         ExplorerViewState override = store.view(PLAYER_A, DISK_A, FOLDER_A);
@@ -318,7 +318,7 @@ public class ExplorerViewStoreTest {
         assertTrue(decodedOverride.visible("informationera:created", false));
         assertEquals(333.0, decodedOverride.width(EXTERNAL, 0));
         assertEquals(222.0, decodedOverride.width(NAME, 0));
-        assertEquals("size", decoded.defaultView(PLAYER_A).groupBy);
+        assertEquals(ExplorerViewState.GROUP_SIZE, decoded.defaultView(PLAYER_A).groupBy);
         assertEquals("small", decoded.view(PLAYER_A, DISK_B, SHARED_PRESET).viewMode);
     }
 
@@ -360,6 +360,28 @@ public class ExplorerViewStoreTest {
     }
 
     @Test
+    public void groupBasisAndReversePersistPerFolder() {
+        ExplorerViewStore store = createStore();
+        ExplorerViewState first = store.view(PLAYER_A, DISK_A, FOLDER_A);
+        first.groupBy = ExplorerViewState.GROUP_ENCHANTMENT;
+        first.groupReverse = true;
+        store.setView(PLAYER_A, DISK_A, FOLDER_A, first);
+
+        ExplorerViewState other = store.view(PLAYER_A, DISK_A, FOLDER_B);
+        other.groupBy = ExplorerViewState.GROUP_RARITY;
+        other.groupReverse = false;
+        store.setView(PLAYER_A, DISK_A, FOLDER_B, other);
+
+        ExplorerViewStore decoded = ExplorerViewStore.decode(store.encode());
+        assertEquals(ExplorerViewState.GROUP_ENCHANTMENT,
+                decoded.view(PLAYER_A, DISK_A, FOLDER_A).groupBy);
+        assertTrue(decoded.view(PLAYER_A, DISK_A, FOLDER_A).groupReverse);
+        assertEquals(ExplorerViewState.GROUP_RARITY,
+                decoded.view(PLAYER_A, DISK_A, FOLDER_B).groupBy);
+        assertFalse(decoded.view(PLAYER_A, DISK_A, FOLDER_B).groupReverse);
+    }
+
+    @Test
     public void legacySevenPartFolderStateMigratesInsideTheStore() {
         ExplorerViewStore store = ExplorerViewStore.decode(List.of(
                 "f2|" + PLAYER_A + "|" + DISK_A + "|blocks|details|size|0|1|type|470,160,120,100,140,100|111100"));
@@ -370,7 +392,7 @@ public class ExplorerViewStoreTest {
             assertFalse(state.visible(ExplorerViewState.BUILT_IN_COLUMN_IDS[i], true));
         }
         assertEquals(ExplorerViewState.BUILT_IN_COLUMN_ORDER, state.columnOrder);
-        assertTrue(store.encode().get(0).contains("v2|"));
+        assertTrue(store.encode().get(0).contains("v3|"));
         assertTrue(store.encode().get(0).contains("informationera:name"));
     }
 

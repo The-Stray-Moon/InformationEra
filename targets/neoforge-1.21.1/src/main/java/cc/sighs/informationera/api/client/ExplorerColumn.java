@@ -12,6 +12,8 @@ import java.util.function.Supplier;
  *
  * <p>{@link #id()} 必须是稳定的 {@code namespace:path}，用于跨重启保存宽度、显隐和列序。
  * 不要使用显示文案或数组下标作为 ID；这样增删模组、调整注册顺序都不会让旧设置串到别的列。
+ * 列还可以通过 {@link Builder#groupRule(ExplorerGroupRule)} 可选地声明分组规则，列 ID 同时成为
+ * 分组依据 ID。
  */
 public final class ExplorerColumn {
 
@@ -22,11 +24,13 @@ public final class ExplorerColumn {
     private final Function<ExplorerColumnContext, String> value;
     private final Function<ExplorerColumnContext, ? extends Comparable<?>> sortValue;
     private final Comparator<ExplorerColumnContext> comparator;
+    private final ExplorerGroupRule groupRule;
 
     private ExplorerColumn(String id, Supplier<Component> label, int defaultWidth, boolean defaultVisible,
                            Function<ExplorerColumnContext, String> value,
                            Function<ExplorerColumnContext, ? extends Comparable<?>> sortValue,
-                           Comparator<ExplorerColumnContext> comparator) {
+                           Comparator<ExplorerColumnContext> comparator,
+                           ExplorerGroupRule groupRule) {
         this.id = id;
         this.label = label;
         this.defaultWidth = defaultWidth;
@@ -34,6 +38,7 @@ public final class ExplorerColumn {
         this.value = value;
         this.sortValue = sortValue;
         this.comparator = comparator;
+        this.groupRule = groupRule;
     }
 
     public static Builder builder(String id) {
@@ -72,6 +77,11 @@ public final class ExplorerColumn {
         return comparator;
     }
 
+    /** 可选的分组规则；没有声明时该列不能作为分组依据。 */
+    public ExplorerGroupRule groupRule() {
+        return groupRule;
+    }
+
     public static final class Builder {
         private final String id;
         private Supplier<Component> label;
@@ -80,6 +90,7 @@ public final class ExplorerColumn {
         private Function<ExplorerColumnContext, String> value;
         private Function<ExplorerColumnContext, ? extends Comparable<?>> sortValue;
         private Comparator<ExplorerColumnContext> comparator;
+        private ExplorerGroupRule groupRule;
 
         private Builder(String id) {
             this.id = id;
@@ -125,6 +136,17 @@ public final class ExplorerColumn {
             return this;
         }
 
+        /**
+         * 可选：让本列同时成为「分组依据」。
+         *
+         * <p>依据 ID 就是列 ID；分组菜单、详情表头右键和文件夹持久化都使用这个 ID。
+         * 不调用此方法时列保持原样，现有 provider 无需修改。
+         */
+        public Builder groupRule(ExplorerGroupRule groupRule) {
+            this.groupRule = groupRule;
+            return this;
+        }
+
         public ExplorerColumn build() {
             if (id == null) {
                 throw new IllegalArgumentException("column id must not be null");
@@ -141,7 +163,7 @@ public final class ExplorerColumn {
                 throw new IllegalArgumentException("column value function is required: " + id);
             }
             int width = Math.max(48, Math.min(4000, defaultWidth));
-            return new ExplorerColumn(id, label, width, defaultVisible, value, sortValue, comparator);
+            return new ExplorerColumn(id, label, width, defaultVisible, value, sortValue, comparator, groupRule);
         }
     }
 }
